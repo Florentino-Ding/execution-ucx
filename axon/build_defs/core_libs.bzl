@@ -1,11 +1,10 @@
 """Core libraries definitions for Axon core."""
 
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("//axon:build_defs/utils_libs.bzl", "SUPPORTED_CPP_STANDARDS")
+load("//axon:build_defs/utils_libs.bzl", "SUPPORTED_CPP_STANDARDS", "axon_cc_library")
 
 def axon_core_libs():
     """Defines all core libraries."""
-    cc_library(
+    axon_cc_library(
         name = "axon_memory_policy",
         hdrs = ["include/axon/memory_policy.hpp"],
         includes = ["include"],
@@ -18,7 +17,7 @@ def axon_core_libs():
         ],
     )
 
-    cc_library(
+    axon_cc_library(
         name = "axon_message_lifecycle_policy",
         hdrs = ["include/axon/message_lifecycle_policy.hpp"],
         includes = ["include"],
@@ -31,7 +30,7 @@ def axon_core_libs():
         ],
     )
 
-    cc_library(
+    axon_cc_library(
         name = "axon_execution_policy",
         includes = ["include"],
         target_compatible_with = select(
@@ -45,7 +44,7 @@ def axon_core_libs():
         ],
     )
 
-    cc_library(
+    axon_cc_library(
         name = "axon_worker",
         srcs = ["src/axon_worker.cpp"],
         hdrs = ["include/axon/axon_worker.hpp"],
@@ -69,7 +68,7 @@ def axon_core_libs():
         ],
     )
 
-    cc_library(
+    axon_cc_library(
         name = "axon_runtime",
         srcs = ["src/axon_runtime.cpp"],
         hdrs = ["include/axon/axon_runtime.hpp"],

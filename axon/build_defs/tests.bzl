@@ -1,11 +1,10 @@
 """Test definitions for Axon core."""
 
-load("@rules_cc//cc:defs.bzl", "cc_test")
-load("//axon:build_defs/utils_libs.bzl", "SUPPORTED_CPP_STANDARDS")
+load("//axon:build_defs/utils_libs.bzl", "SUPPORTED_CPP_STANDARDS", "axon_cc_test")
 
 def axon_tests():
     """Defines all test targets."""
-    cc_test(
+    axon_cc_test(
         name = "axon_worker_basic_test",
         srcs = ["tests/axon_worker_basic_test.cpp"],
         includes = ["include"],
@@ -20,7 +19,7 @@ def axon_tests():
         ],
     )
 
-    cc_test(
+    axon_cc_test(
         name = "axon_worker_test",
         srcs = ["tests/axon_worker_test.cpp"],
         includes = ["include"],
@@ -37,7 +36,7 @@ def axon_tests():
         ],
     )
 
-    cc_test(
+    axon_cc_test(
         name = "avro_serialization_test",
         srcs = ["tests/avro_serialization_test.cpp"],
         includes = ["include"],
@@ -52,7 +51,7 @@ def axon_tests():
         ],
     )
 
-    cc_test(
+    axon_cc_test(
         name = "unifex_io_test",
         srcs = ["tests/unifex_io_test.cpp"],
         includes = ["include"],
@@ -66,7 +65,7 @@ def axon_tests():
         ],
     )
 
-    cc_test(
+    axon_cc_test(
         name = "async_io_test",
         srcs = ["tests/async_io_test.cpp"],
         includes = ["include"],
@@ -80,7 +79,7 @@ def axon_tests():
         ],
     )
 
-    cc_test(
+    axon_cc_test(
         name = "axon_storage_test",
         srcs = ["tests/axon_storage_test.cpp"],
         includes = ["include"],
@@ -94,7 +93,7 @@ def axon_tests():
         ],
     )
 
-    cc_test(
+    axon_cc_test(
         name = "message_lifecycle_policy_test",
         srcs = ["tests/message_lifecycle_policy_test.cpp"],
         includes = ["include"],
@@ -111,7 +110,7 @@ def axon_tests():
         ],
     )
 
-    cc_test(
+    axon_cc_test(
         name = "process_stored_requests_test",
         srcs = ["tests/process_stored_requests_test.cpp"],
         includes = ["include"],

@@ -1,9 +1,8 @@
 """Python bindings for Axon Runtime using nanobind."""
 
 load("@python_deps//:requirements.bzl", "requirement")
-load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
 load("@rules_python//python:defs.bzl", "py_library")
-load("//axon:build_defs/utils_libs.bzl", "SUPPORTED_CPP_STANDARDS", "axon_utils_config_settings")
+load("//axon:build_defs/utils_libs.bzl", "SUPPORTED_CPP_STANDARDS", "axon_cc_binary", "axon_cc_library", "axon_utils_config_settings")
 load("//axon/python:tests.bzl", "axon_pytest_test")
 load("//axon/python:wheel.bzl", "axon_python_wheel", "copy_to_dir")
 
@@ -12,7 +11,7 @@ package(default_visibility = ["//visibility:public"])
 # Define config settings for C++ standards
 axon_utils_config_settings()
 
-cc_library(
+axon_cc_library(
     name = "async_bridge",
     srcs = [
         "src/async_bridge.hpp",
@@ -27,7 +26,7 @@ cc_library(
 )
 
 # Header-only version for axon_python_runtime (which compiles .cpp directly)
-cc_library(
+axon_cc_library(
     name = "dlpack_helpers_headers",
     hdrs = [
         "src/dlpack_helpers.hpp",
@@ -44,7 +43,7 @@ cc_library(
     ],
 )
 
-cc_library(
+axon_cc_library(
     name = "dlpack_helpers",
     srcs = [
         "src/dlpack_helpers.cpp",
@@ -68,7 +67,7 @@ cc_library(
 )
 
 # Header-only version for axon_python_runtime (which compiles .cpp directly)
-cc_library(
+axon_cc_library(
     name = "param_conversion_headers",
     hdrs = [
         "src/param_conversion.hpp",
@@ -86,7 +85,7 @@ cc_library(
     ],
 )
 
-cc_library(
+axon_cc_library(
     name = "param_conversion",
     srcs = [
         "src/param_conversion.cpp",
@@ -111,7 +110,7 @@ cc_library(
 )
 
 # Header-only version for axon_python_runtime (which compiles .cpp directly)
-cc_library(
+axon_cc_library(
     name = "python_helpers_headers",
     hdrs = [
         "src/python_helpers.hpp",
@@ -126,7 +125,7 @@ cc_library(
     ],
 )
 
-cc_library(
+axon_cc_library(
     name = "python_module",
     srcs = [
         "src/python_module.cpp",
@@ -144,7 +143,7 @@ cc_library(
     alwayslink = True,
 )
 
-cc_library(
+axon_cc_library(
     name = "python_helpers",
     srcs = [
         "src/python_helpers.cpp",
@@ -165,7 +164,7 @@ cc_library(
 )
 
 # Header-only version for memory_policy_helpers
-cc_library(
+axon_cc_library(
     name = "memory_policy_helpers_headers",
     hdrs = [
         "src/memory_policy_helpers.hpp",
@@ -181,7 +180,7 @@ cc_library(
     ],
 )
 
-cc_library(
+axon_cc_library(
     name = "memory_policy_helpers",
     srcs = [
         "src/memory_policy_helpers.cpp",
@@ -204,7 +203,7 @@ cc_library(
     alwayslink = True,
 )
 
-cc_library(
+axon_cc_library(
     name = "python_wake_manager_headers",
     hdrs = [
         "src/python_wake_manager.hpp",
@@ -220,7 +219,7 @@ cc_library(
     ],
 )
 
-cc_library(
+axon_cc_library(
     name = "python_wake_manager",
     srcs = [
         "src/python_wake_manager.cpp",
@@ -243,7 +242,7 @@ cc_library(
 )
 
 # Header-only version for axon_python_runtime (which compiles .cpp directly)
-cc_library(
+axon_cc_library(
     name = "bindings_enums_headers",
     hdrs = [
         "src/bindings_enums.hpp",
@@ -258,7 +257,7 @@ cc_library(
     ],
 )
 
-cc_library(
+axon_cc_library(
     name = "bindings_enums",
     srcs = [
         "src/bindings_enums.cpp",
@@ -278,7 +277,7 @@ cc_library(
 )
 
 # Header-only version for axon_python_runtime (which compiles .cpp directly)
-cc_library(
+axon_cc_library(
     name = "bindings_types_headers",
     hdrs = [
         "src/bindings_types.hpp",
@@ -295,7 +294,7 @@ cc_library(
     ],
 )
 
-cc_library(
+axon_cc_library(
     name = "bindings_types",
     srcs = [
         "src/bindings_types.cpp",
@@ -318,7 +317,7 @@ cc_library(
 )
 
 # Header-only version for bindings_runtime_helpers
-cc_library(
+axon_cc_library(
     name = "bindings_runtime_helpers_headers",
     hdrs = [
         "src/bindings_runtime_helpers.hpp",
@@ -342,7 +341,7 @@ cc_library(
     ],
 )
 
-cc_library(
+axon_cc_library(
     name = "bindings_runtime_helpers",
     srcs = [
         "src/bindings_runtime_helpers.cpp",
@@ -373,7 +372,7 @@ cc_library(
 )
 
 # Header-only version for bindings_runtime_wrapper
-cc_library(
+axon_cc_library(
     name = "bindings_runtime_wrapper_headers",
     hdrs = [
         "src/bindings_runtime_wrapper.hpp",
@@ -396,7 +395,7 @@ cc_library(
     ],
 )
 
-cc_library(
+axon_cc_library(
     name = "bindings_runtime_wrapper",
     srcs = [
         "src/bindings_runtime_wrapper.cpp",
@@ -426,7 +425,7 @@ cc_library(
 )
 
 # Header-only version for axon_python_runtime (which compiles .cpp directly)
-cc_library(
+axon_cc_library(
     name = "bindings_runtime_headers",
     hdrs = [
         "src/bindings_runtime.hpp",
@@ -452,7 +451,7 @@ cc_library(
     ],
 )
 
-cc_library(
+axon_cc_library(
     name = "bindings_runtime",
     srcs = [
         "src/bindings_runtime.cpp",
@@ -500,7 +499,7 @@ copy_to_dir(
     visibility = ["//visibility:public"],
 )
 
-cc_library(
+axon_cc_library(
     name = "bindings_memory_resource",
     srcs = ["src/bindings_memory_resource.cpp"],
     hdrs = ["src/bindings_memory_resource.hpp"],
@@ -515,7 +514,7 @@ cc_library(
     alwayslink = True,
 )
 
-cc_library(
+axon_cc_library(
     name = "axon_python_entry",
     srcs = ["src/axon_python.cpp"],
     target_compatible_with = select(
@@ -532,7 +531,7 @@ cc_library(
     alwayslink = True,
 )
 
-cc_binary(
+axon_cc_binary(
     name = "axon_python_runtime",
     linkopts = [
         "-shared",

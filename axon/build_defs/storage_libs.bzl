@@ -1,11 +1,10 @@
 """Storage libraries definitions for Axon core."""
 
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("//axon:build_defs/utils_libs.bzl", "SUPPORTED_CPP_STANDARDS")
+load("//axon:build_defs/utils_libs.bzl", "SUPPORTED_CPP_STANDARDS", "axon_cc_library")
 
 def axon_storage_libs():
     """Defines all storage-related libraries."""
-    cc_library(
+    axon_cc_library(
         name = "avro_schema",
         srcs = ["src/storage/avro_schema.cpp"],
         hdrs = ["include/axon/storage/avro_schema.hpp"],
@@ -21,7 +20,7 @@ def axon_storage_libs():
         ],
     )
 
-    cc_library(
+    axon_cc_library(
         name = "avro_serialization",
         srcs = ["src/storage/avro_serialization.cpp"],
         hdrs = ["include/axon/storage/avro_serialization.hpp"],
@@ -40,7 +39,7 @@ def axon_storage_libs():
         ],
     )
 
-    cc_library(
+    axon_cc_library(
         name = "unifex_io",
         srcs = ["src/storage/unifex_io.cpp"],
         hdrs = ["include/axon/storage/unifex_io.hpp"],
@@ -56,7 +55,7 @@ def axon_storage_libs():
 
     # A Pimpl implementation of avro::OutputStream and avro::InputStream
     # that uses unifex_io.hpp to implement the asynchronous I/O.
-    cc_library(
+    axon_cc_library(
         name = "avro_unifex_io",
         srcs = ["src/storage/avro_unifex_io.cpp"],
         hdrs = ["include/axon/storage/avro_unifex_io.hpp"],
@@ -72,7 +71,7 @@ def axon_storage_libs():
         ],
     )
 
-    cc_library(
+    axon_cc_library(
         name = "async_io",
         srcs = ["src/storage/async_io.cpp"],
         hdrs = ["include/axon/storage/async_io.hpp"],
@@ -87,7 +86,7 @@ def axon_storage_libs():
         ],
     )
 
-    cc_library(
+    axon_cc_library(
         name = "axon_storage",
         srcs = ["src/storage/axon_storage.cpp"],
         hdrs = ["include/axon/storage/axon_storage.hpp"],
