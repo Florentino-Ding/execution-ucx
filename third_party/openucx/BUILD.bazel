@@ -2,11 +2,17 @@
 Unified Communication X (UCX) is an award winning, optimized production proven-communication framework for modern, high-bandwidth and low-latency networks.
 """
 
+load("@//axon:build_defs/utils_libs.bzl", "AXON_UFTRACE_COPTS")
 load("@//third_party/openucx:utils.bzl", "file_filter")
 load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_foreign_cc//foreign_cc:defs.bzl", "configure_make")
 
 package(default_visibility = ["//visibility:public"])
+
+UCX_UFTRACE_COPTS = select({
+    "@//axon:uftrace_enabled": AXON_UFTRACE_COPTS,
+    "//conditions:default": [],
+})
 
 filegroup(
     name = "all_srcs",
@@ -57,7 +63,7 @@ configure_make(
     copts = [
         "-Wno-error",
         "-fPIC",  # Add position-independent code flag for shared library linking
-    ],
+    ] + UCX_UFTRACE_COPTS,
     lib_source = "@ucx//:all_srcs",
     out_bin_dir = "bin",
     out_binaries = [

@@ -1,6 +1,5 @@
-load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 load("@rules_cuda//cuda:defs.bzl", "cuda_library", "requires_cuda")
+load("//axon:build_defs/utils_libs.bzl", "AXON_UFTRACE_COPTS", "axon_cc_binary", "axon_cc_library", "axon_cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -17,14 +16,14 @@ SUPPORTED_CPP_STANDARDS = [
     values = {"cxxopt": "-std=c++" + v},
 ) for v in SUPPORTED_CPP_STANDARDS]
 
-cc_library(
+axon_cc_library(
     name = "ucx_context_def_lib",
     hdrs = [
         "ucx_context_def.h",
     ],
 )
 
-cc_library(
+axon_cc_library(
     name = "ucx_connection",
     srcs = [
         "ucx_connection.cpp",
@@ -43,7 +42,7 @@ cc_library(
     ],
 )
 
-cc_library(
+axon_cc_library(
     name = "ucx_connection_manager",
     srcs = [
         "ucx_connection_manager.cpp",
@@ -61,7 +60,7 @@ cc_library(
     ],
 )
 
-cc_library(
+axon_cc_library(
     name = "ucx_memory_resource_lib",
     srcs = [
         "ucx_memory_resource.cpp",
@@ -78,7 +77,7 @@ cc_library(
     ],
 )
 
-cc_library(
+axon_cc_library(
     name = "ucx_context_data_lib",
     hdrs = [
         "ucx_context_data.hpp",
@@ -88,7 +87,7 @@ cc_library(
     ],
 )
 
-cc_library(
+axon_cc_library(
     name = "ucx_am_context",
     srcs = [
         "ucx_am_context/ucx_am_context.cpp",
@@ -115,7 +114,7 @@ cc_library(
     ],
 )
 
-cc_library(
+axon_cc_library(
     name = "ucx_cuda_memory_manager",
     hdrs = [
         "cuda/ucx_cuda_macro.h",
@@ -133,10 +132,14 @@ cuda_library(
         "ucx_am_context/ucx_am_context_test_helper.h",
         "ucx_context_def.h",
     ],
+    host_copts = select({
+        "//axon:uftrace_enabled": AXON_UFTRACE_COPTS,
+        "//conditions:default": [],
+    }),
     target_compatible_with = requires_cuda(),
 )
 
-cc_library(
+axon_cc_library(
     name = "ucx_cuda_context",
     hdrs = [
         "cuda/ucx_cuda_context.hpp",
@@ -147,7 +150,7 @@ cc_library(
     ],
 )
 
-cc_library(
+axon_cc_library(
     name = "ucx_am_context_test_host_helper",
     srcs = ["ucx_am_context/ucx_am_context_test_host_helper.cpp"],
     hdrs = [
@@ -156,7 +159,7 @@ cc_library(
     ],
 )
 
-cc_test(
+axon_cc_test(
     name = "ucx_context_data_test",
     srcs = ["ucx_context_data_test.cpp"],
     target_compatible_with = select(
@@ -169,7 +172,7 @@ cc_test(
     ],
 )
 
-cc_test(
+axon_cc_test(
     name = "ucx_am_connection_test",
     srcs = ["ucx_am_context/ucx_am_connection_test.cpp"],
     target_compatible_with = select(
@@ -182,7 +185,7 @@ cc_test(
     ],
 )
 
-cc_test(
+axon_cc_test(
     name = "ucx_am_context_test",
     srcs = [
         "ucx_am_context/ucx_am_context_test.cpp",
@@ -218,7 +221,7 @@ cc_test(
     }),
 )
 
-cc_binary(
+axon_cc_binary(
     name = "ucx_am_context_perf",
     srcs = ["ucx_am_context/ucx_am_context_perf.cpp"],
     copts = [
