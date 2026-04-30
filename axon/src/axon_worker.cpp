@@ -1218,46 +1218,6 @@ auto AxonWorker::ProcessRndvBuffer_(
     std::move(mem_policy), tensor_metas);
 }
 
-template auto AxonWorker::ProcessRndvBuffer_<
-  ucxx::UcxBuffer, AlwaysOnHostPolicy>(
-  WorkerScheduler scheduler, uint64_t am_desc_key,
-  AlwaysOnHostPolicy mem_policy, utils::TensorMetaSpan tensor_metas)
-  -> ucxx::ucx_am_context::recv_buffer_sender;
-
-template auto AxonWorker::ProcessRndvBuffer_<
-  ucxx::UcxBufferVec, AlwaysOnHostPolicy>(
-  WorkerScheduler scheduler, uint64_t am_desc_key,
-  AlwaysOnHostPolicy mem_policy, utils::TensorMetaSpan tensor_metas)
-  -> ucxx::ucx_am_context::recv_iovec_buffer_sender;
-
-template auto AxonWorker::ProcessRndvBuffer_<
-  ucxx::UcxBuffer, CustomMemoryPolicy<ucxx::UcxBuffer>>(
-  WorkerScheduler scheduler, uint64_t am_desc_key,
-  CustomMemoryPolicy<ucxx::UcxBuffer> mem_policy,
-  utils::TensorMetaSpan tensor_metas)
-  -> ucxx::ucx_am_context::recv_buffer_sender;
-
-template auto AxonWorker::ProcessRndvBuffer_<
-  ucxx::UcxBufferVec, CustomMemoryPolicy<ucxx::UcxBufferVec>>(
-  WorkerScheduler scheduler, uint64_t am_desc_key,
-  CustomMemoryPolicy<ucxx::UcxBufferVec> mem_policy,
-  utils::TensorMetaSpan tensor_metas)
-  -> ucxx::ucx_am_context::recv_iovec_buffer_sender;
-
-template auto AxonWorker::ProcessRndvBuffer_<
-  ucxx::UcxBuffer, CustomMemoryPolicy<rpc::PayloadVariant>>(
-  WorkerScheduler scheduler, uint64_t am_desc_key,
-  CustomMemoryPolicy<rpc::PayloadVariant> mem_policy,
-  utils::TensorMetaSpan tensor_metas)
-  -> ucxx::ucx_am_context::recv_buffer_sender;
-
-template auto AxonWorker::ProcessRndvBuffer_<
-  ucxx::UcxBufferVec, CustomMemoryPolicy<rpc::PayloadVariant>>(
-  WorkerScheduler scheduler, uint64_t am_desc_key,
-  CustomMemoryPolicy<rpc::PayloadVariant> mem_policy,
-  utils::TensorMetaSpan tensor_metas)
-  -> ucxx::ucx_am_context::recv_iovec_buffer_sender;
-
 auto AxonWorker::ServerProcessMessage_(const RecvVariant& message) noexcept {
   auto handler = std::visit(
     [this](const auto& message) -> ServerMessageHandlerSender {

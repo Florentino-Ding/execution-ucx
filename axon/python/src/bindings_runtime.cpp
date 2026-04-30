@@ -51,6 +51,8 @@ limitations under the License.
 #include "ucx_context/cuda/ucx_cuda_context.hpp"
 #endif
 
+#include <ittnotify.h>
+
 namespace nb = nanobind;
 namespace rpc = eux::rpc;
 namespace ucxx = eux::ucxx;
@@ -918,6 +920,8 @@ void RegisterRuntime(nb::module_& m) {
       nb::module_ asyncio = python::GetAsyncioModule();
       nb::object future = asyncio.attr("Future")();
 
+      __itt_resume();
+
       // Resolve function ID
       rpc::function_id_t function_id;
       if (nb::isinstance<nb::int_>(function)) {
@@ -1007,6 +1011,7 @@ void RegisterRuntime(nb::module_& m) {
         }
       }
 
+      __itt_pause();
       return future;
     },
     nb::rv_policy::none,  // Don't apply any rv_policy to prevent copy of self

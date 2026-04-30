@@ -1,10 +1,11 @@
 """Errors libraries definitions for Axon core."""
 
-load("//axon:build_defs/utils_libs.bzl", "SUPPORTED_CPP_STANDARDS", "axon_cc_library")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//axon:build_defs/utils_libs.bzl", "SUPPORTED_CPP_STANDARDS")
 
 def axon_errors_libs():
     """Defines all errors-related libraries."""
-    axon_cc_library(
+    cc_library(
         name = "axon_error",
         srcs = ["src/errors/error_types.cpp"],
         hdrs = ["include/axon/errors/error_types.hpp"],

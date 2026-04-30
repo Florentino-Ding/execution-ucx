@@ -72,6 +72,10 @@ bazel_dep(name = "avro-cpp", version = "1.12.0")
 proxy_deps = use_extension("//third_party/proxy:extensions.bzl", "proxy_dep")
 use_repo(proxy_deps, "proxy")
 
+# Intel VTune ITT library for instrumentation
+ittapi_deps = use_extension("//third_party/ittapi:extensions.bzl", "ittapi_dep")
+use_repo(ittapi_deps, "ittapi")
+
 # setting nanobind for Python bindings
 bazel_dep(name = "nanobind", version = "2.9.2")
 
