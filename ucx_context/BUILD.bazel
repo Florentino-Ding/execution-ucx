@@ -1,5 +1,7 @@
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_library")
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -195,8 +197,9 @@ cc_test(
     ],
 )
 
-cc_test(
-    name = "ucx_am_context_test",
+# The test executable is compiled as a cc_binary so that we can wrap it with a sh_test.
+cc_binary(
+    name = "ucx_am_context_test_bin",
     srcs = [
         "ucx_am_context/ucx_am_context_test.cpp",
     ],
@@ -226,6 +229,42 @@ cc_test(
             "@unifex",
         ],
     }),
+)
+
+# WORKAROUND for Bazel _solib flattening and UCX plugin discovery:
+# UCX natively uses dladdr() to find libucs.so and appends "/ucx" to load plugins (like libuct_cuda.so).
+# Bazel's runfiles system symlinks all dynamic libraries into a flattened _solib directory.
+# This completely destroys the relative directory structure expected by UCX.
+# Because we strictly forbid statically linking the plugins, and we cannot safely modify
+# UCX's default compilation paths without polluting the production .so files,
+# the only clean architectural solution is to use a Bazel sh_test wrapper.
+# The wrapper accurately extracts the true sandbox path of the plugins from $(rootpaths)
+# and injects it into UCX_MODULE_DIR right before execution, ensuring native dlopen()
+# success without modifying any C++ code.
+
+write_file(
+    name = "generate_run_ucx_test_sh",
+    out = "run_ucx_test_generated.sh",
+    content = [
+        "#!/bin/bash",
+        "FIRST_FILE=$(echo \"$RAW_MODULE_FILES\" | awk '{print $1}')",
+        "export UCX_MODULE_DIR=$(dirname \"$FIRST_FILE\")",
+        "exec \"./$TEST_BIN\" \"$@\"",
+    ],
+    is_executable = True,
+)
+
+sh_test(
+    name = "ucx_am_context_test",
+    srcs = ["run_ucx_test_generated.sh"],
+    data = [
+        ":ucx_am_context_test_bin",
+        "@ucx//:ucx_transport_shared_libs",
+    ],
+    env = {
+        "RAW_MODULE_FILES": "$(rootpaths @ucx//:ucx_transport_shared_libs)",
+        "TEST_BIN": "$(rootpath :ucx_am_context_test_bin)",
+    },
 )
 
 cc_binary(

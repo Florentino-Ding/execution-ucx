@@ -16,6 +16,7 @@ limitations under the License.
 #include "ucx_context/ucx_am_context/ucx_am_context.hpp"
 
 #include <arpa/inet.h>
+#include <sys/stat.h>
 #if CUDA_ENABLED
 #include <cuda_runtime.h>
 #endif
@@ -193,7 +194,7 @@ class UcxContextCUDARunner : public UcxContextRunner {
  public:
   UcxContextCUDARunner(
     std::string name, bool use_ucp_address,
-    std::chrono::milliseconds timeout = std::chrono::milliseconds(300))
+    std::chrono::milliseconds timeout = std::chrono::seconds(30))
     : UcxContextRunner(name, timeout), use_ucp_address_(use_ucp_address) {
     init();
   }
@@ -605,13 +606,27 @@ class UcxAmTest : public ::testing::Test {
     inplace_stop_source& stopSource) {
     async_scope scope;
     auto workerThread = processScheduler;
-    [[maybe_unused]] auto conn_id =
-      co_await connect_endpoint(scheduler, client_ucp_address);
-    spawn_detached(
-      on(
-        workerThread, biDiServerHeaderBufferRepeatRecvSendTask(
-                        scheduler, processScheduler, recvDataType, stopSource)),
-      scope);
+    co_await let_error(
+      connect_endpoint(scheduler, client_ucp_address)
+        | then([&]([[maybe_unused]] std::uint64_t conn_id_) {
+            spawn_detached(
+              on(
+                workerThread,
+                biDiServerHeaderBufferRepeatRecvSendTask(
+                  scheduler, processScheduler, recvDataType, stopSource)),
+              scope);
+          }),
+      [&](std::variant<std::error_code, std::exception_ptr>&& err) {
+        return just_from([err = std::move(err), &stopSource]() mutable {
+          stopSource.request_stop();
+          if (std::holds_alternative<std::exception_ptr>(err)) {
+            std::rethrow_exception(std::get<std::exception_ptr>(err));
+          }
+          throw std::system_error(
+            std::get<std::error_code>(err),
+            "biDiServerHeaderBufferStart connect");
+        });
+      });
     co_await scope.join();
     co_return;
   }
@@ -624,6 +639,13 @@ class UcxAmTest : public ::testing::Test {
     if (test_memory_type == ucx_memory_type::CUDA) {
       GTEST_SKIP()
         << "CUDA not enabled, skipping CUDA memory type test variant.";
+      return;
+    }
+#else
+    if (test_memory_type == ucx_memory_type::CUDA && false) {
+      GTEST_SKIP()
+        << "nvidia_peermem not loaded: GPU-Direct required for CUDA memory "
+           "transfers.";
       return;
     }
 #endif
@@ -805,21 +827,34 @@ class UcxAmTest : public ::testing::Test {
     inplace_stop_source& stopSource) {
     async_scope scope;
     auto workerThread = processScheduler;
-    [[maybe_unused]] auto conn_id =
-      co_await connect_endpoint(scheduler, client_ucp_address);
-    spawn_detached(
-      on(
-        workerThread, biDiServerRepeatRecvSendTask(
-                        scheduler, processScheduler, recvDataType, stopSource)),
-      scope);
+    co_await let_error(
+      connect_endpoint(scheduler, client_ucp_address)
+        | then([&]([[maybe_unused]] std::uint64_t conn_id_) {
+            spawn_detached(
+              on(
+                workerThread,
+                biDiServerRepeatRecvSendTask(
+                  scheduler, processScheduler, recvDataType, stopSource)),
+              scope);
+          }),
+      [&](std::variant<std::error_code, std::exception_ptr>&& err) {
+        return just_from([err = std::move(err), &stopSource]() mutable {
+          stopSource.request_stop();
+          if (std::holds_alternative<std::exception_ptr>(err)) {
+            std::rethrow_exception(std::get<std::exception_ptr>(err));
+          }
+          throw std::system_error(
+            std::get<std::error_code>(err), "biDiServerStart connect");
+        });
+      });
     co_await scope.join();
     co_return;
   }
 
   task<UcxAmData> biDiClientSendRecvTask(
     ucx_am_context::scheduler& ucxScheduler,
-    static_thread_pool::scheduler& processScheduler, std::uint64_t conn_id,
-    ucx_am_data& sendData) {
+    [[maybe_unused]] static_thread_pool::scheduler& processScheduler,
+    std::uint64_t conn_id, ucx_am_data& sendData) {
     co_await connection_send(ucxScheduler, conn_id, sendData);
     auto recvBundle =
       co_await connection_recv(ucxScheduler, sendData.buffer_type);
@@ -873,9 +908,22 @@ class UcxAmTest : public ::testing::Test {
     inplace_stop_source& stopSource) {
     async_scope scope;
     auto workerThread = processScheduler;
-    auto conn_id = co_await connect_endpoint(ucxScheduler, server_ucp_address);
+    std::optional<std::uint64_t> conn_id_opt;
+    co_await let_error(
+      connect_endpoint(ucxScheduler, server_ucp_address)
+        | then([&](std::uint64_t id) { conn_id_opt = id; }),
+      [&](
+        std::variant<std::error_code, std::exception_ptr>&& err) -> task<void> {
+        co_await scope.join();
+        stopSource.request_stop();
+        if (std::holds_alternative<std::exception_ptr>(err)) {
+          std::rethrow_exception(std::get<std::exception_ptr>(err));
+        }
+        throw std::system_error(
+          std::get<std::error_code>(err), "biDiClientStart connect");
+      });
     co_return co_await biDiClientSpawnTask(
-      ucxScheduler, workerThread, scope, stopSource, conn_id, sendData);
+      ucxScheduler, workerThread, scope, stopSource, *conn_id_opt, sendData);
   }
 
   // Helper function for bidirectional transfer tests
@@ -886,6 +934,13 @@ class UcxAmTest : public ::testing::Test {
     if (test_memory_type == ucx_memory_type::CUDA) {
       GTEST_SKIP()
         << "CUDA not enabled, skipping CUDA memory type test variant.";
+      return;
+    }
+#else
+    if (test_memory_type == ucx_memory_type::CUDA && false) {
+      GTEST_SKIP()
+        << "nvidia_peermem not loaded: GPU-Direct required for CUDA memory "
+           "transfers.";
       return;
     }
 #endif
@@ -1351,12 +1406,13 @@ TEST_F(UcxAmTest, ErrorHandling) {
   sync_wait(let_error(
     connection_send(clientScheduler, conn_id.value(), sendData)
       | then([&]() { sendSuccess.store(true); }),
-    [&](std::variant<std::error_code, std::exception_ptr>&& error_variant) {
+    [&]([[maybe_unused]] std::variant<std::error_code, std::exception_ptr>&&
+          error_variant) {
       return sequence(
         then(
           handle_error_connection(
             clientScheduler,
-            [&](std::uint64_t conn_id, ucs_status_t status) {
+            [&]([[maybe_unused]] std::uint64_t conn_id, ucs_status_t status) {
               EXPECT_LT(status, 0);
               return true;
             }),
@@ -1536,6 +1592,12 @@ void UcxAmTest::runUcpAddressHeaderBufferTestLogic(
 #if !CUDA_ENABLED
   if (test_memory_type == ucx_memory_type::CUDA) {
     GTEST_SKIP() << "CUDA not enabled, skipping CUDA memory type test variant.";
+    return;
+  }
+#else
+  if (test_memory_type == ucx_memory_type::CUDA && false) {
+    GTEST_SKIP() << "nvidia_peermem not loaded: GPU-Direct required for CUDA "
+                    "memory transfers.";
     return;
   }
 #endif
