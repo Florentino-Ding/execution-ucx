@@ -96,13 +96,12 @@ axon::CustomMemoryPolicy<BufferType> create_custom_memory_policy(
           + std::to_string(meta.size()));
       }
       auto mr = runtime.GetMemoryResourceManager();
-      auto buffer = DlpackToUcxBuffer(py_result, meta[0], mr.get().context());
+      auto buffer = DlpackToUcxBuffer(py_result, meta[0], mr.get());
       RegisterCustomBuffer(buffer.data(), py_result);
       return buffer;
     } else if constexpr (std::is_same_v<BufferType, ucxx::UcxBufferVec>) {
       auto mr = runtime.GetMemoryResourceManager();
-      auto buffer_vec =
-        DlpackToUcxBufferVec(py_result, meta, mr.get().context());
+      auto buffer_vec = DlpackToUcxBufferVec(py_result, meta, mr.get());
       // Register each buffer in the vector
       const auto& buffers = buffer_vec.buffers();
       nb::list py_list = nb::cast<nb::list>(py_result);
@@ -113,13 +112,12 @@ axon::CustomMemoryPolicy<BufferType> create_custom_memory_policy(
     } else if constexpr (std::is_same_v<BufferType, rpc::PayloadVariant>) {
       auto mr = runtime.GetMemoryResourceManager();
       if (meta.size() == 1) {
-        auto buffer = DlpackToUcxBuffer(py_result, meta[0], mr.get().context());
+        auto buffer = DlpackToUcxBuffer(py_result, meta[0], mr.get());
         RegisterCustomBuffer(buffer.data(), py_result);
         return rpc::PayloadVariant(
           std::in_place_type<ucxx::UcxBuffer>, std::move(buffer));
       } else {
-        auto buffer_vec =
-          DlpackToUcxBufferVec(py_result, meta, mr.get().context());
+        auto buffer_vec = DlpackToUcxBufferVec(py_result, meta, mr.get());
         const auto& buffers = buffer_vec.buffers();
         nb::list py_list = nb::cast<nb::list>(py_result);
         for (size_t i = 0; i < buffers.size(); ++i) {

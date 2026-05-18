@@ -58,26 +58,26 @@ class UcxBuffer {
    * @param own_buffer Whether to own the buffer.
    */
   UcxBuffer(
-    const UcxAllocatorContext& mr_ctx, ucx_memory_type_t type, size_t size,
+    UcxMemoryResourceManager& mr, ucx_memory_type_t type, size_t size,
     void* mem_h = nullptr, bool own_buffer = true,
     ucp_release_fn_t ucp_release_fn = nullptr)
-    : mr_ctx_(mr_ctx),
+    : mr_(&mr),
       type_(type),
       buffer_{nullptr, 0},
       mem_h_(mem_h),
       own_buffer_(own_buffer),
       ucp_release_fn_(ucp_release_fn) {
     if (size > 0) {
-      buffer_.data = mr_ctx_.get().mr->allocate(type_, size);
+      buffer_.data = mr_->allocate(type_, size);
       buffer_.size = size;
     }
   }
 
   UcxBuffer(
-    const UcxAllocatorContext& mr_ctx, ucx_memory_type_t type,
-    ucx_buffer_t&& buffer, void* mem_h = nullptr, bool own_buffer = true,
+    UcxMemoryResourceManager& mr, ucx_memory_type_t type, ucx_buffer_t&& buffer,
+    void* mem_h = nullptr, bool own_buffer = true,
     ucp_release_fn_t ucp_release_fn = nullptr)
-    : mr_ctx_(mr_ctx),
+    : mr_(&mr),
       type_(type),
       buffer_(std::move(buffer)),
       mem_h_(mem_h),
@@ -85,10 +85,10 @@ class UcxBuffer {
       ucp_release_fn_(ucp_release_fn) {}
 
   UcxBuffer(
-    const UcxAllocatorContext& mr_ctx, ucx_memory_type_t type,
+    UcxMemoryResourceManager& mr, ucx_memory_type_t type,
     const ucx_buffer_t& buffer, void* mem_h = nullptr, bool own_buffer = false,
     ucp_release_fn_t ucp_release_fn = nullptr)
-    : mr_ctx_(mr_ctx),
+    : mr_(&mr),
       type_(type),
       buffer_(buffer),
       mem_h_(mem_h),
@@ -96,10 +96,10 @@ class UcxBuffer {
       ucp_release_fn_(ucp_release_fn) {}
 
   UcxBuffer(
-    const UcxAllocatorContext& mr_ctx, ucx_memory_type_t type,
-    const void* buffer, size_t size, void* mem_h = nullptr,
-    bool own_buffer = false, ucp_release_fn_t ucp_release_fn = nullptr)
-    : mr_ctx_(mr_ctx),
+    UcxMemoryResourceManager& mr, ucx_memory_type_t type, const void* buffer,
+    size_t size, void* mem_h = nullptr, bool own_buffer = false,
+    ucp_release_fn_t ucp_release_fn = nullptr)
+    : mr_(&mr),
       type_(type),
       buffer_({const_cast<void*>(buffer), size}),
       mem_h_(mem_h),
@@ -107,7 +107,7 @@ class UcxBuffer {
       ucp_release_fn_(ucp_release_fn) {}
 
   UcxBuffer(UcxBuffer&& other, bool own_buffer)
-    : mr_ctx_(other.mr_ctx_),
+    : mr_(other.mr_),
       type_(other.type_),
       buffer_(other.buffer_),
       mem_h_(other.mem_h_),
@@ -124,12 +124,8 @@ class UcxBuffer {
     if (buffer_.data && own_buffer_) {
       if (ucp_release_fn_) {
         ucp_release_fn_(buffer_.data);
-      } else if (mr_ctx_.get().is_alive) {
-        mr_ctx_.get().mr->deallocate(type_, buffer_.data, buffer_.size);
       } else {
-        std::cerr << "[Axon Fatal Warning] Lifecycle UB Detected: Tensor "
-                     "outlived AxonRuntime! Memory leaked to prevent Segfault."
-                  << std::endl;
+        mr_->deallocate(type_, buffer_.data, buffer_.size);
       }
     }
   }
@@ -138,7 +134,7 @@ class UcxBuffer {
   UcxBuffer& operator=(const UcxBuffer&) = delete;
 
   UcxBuffer(UcxBuffer&& other) noexcept
-    : mr_ctx_(other.mr_ctx_),
+    : mr_(other.mr_),
       type_(other.type_),
       buffer_(other.buffer_),
       mem_h_(other.mem_h_),
@@ -153,16 +149,11 @@ class UcxBuffer {
       if (buffer_.data && own_buffer_) {
         if (ucp_release_fn_) {
           ucp_release_fn_(buffer_.data);
-        } else if (mr_ctx_.get().is_alive) {
-          mr_ctx_.get().mr->deallocate(type_, buffer_.data, buffer_.size);
         } else {
-          std::cerr
-            << "[Axon Fatal Warning] Lifecycle UB Detected: Tensor outlived "
-               "AxonRuntime! Memory leaked to prevent Segfault."
-            << std::endl;
+          mr_->deallocate(type_, buffer_.data, buffer_.size);
         }
       }
-      mr_ctx_ = other.mr_ctx_;
+      mr_ = other.mr_;
       type_ = other.type_;
       buffer_ = other.buffer_;
       mem_h_ = other.mem_h_;
@@ -221,7 +212,7 @@ class UcxBuffer {
   UcxBufferVec to_buffer_vec(const std::vector<size_t>& sizes) &&;
 
  private:
-  std::reference_wrapper<const UcxAllocatorContext> mr_ctx_;
+  UcxMemoryResourceManager* mr_;
   ucx_memory_type_t type_;
   ucx_buffer_t buffer_;
   void* mem_h_;
@@ -249,34 +240,32 @@ class UcxHeader {
    * @param size The size of the buffer in bytes.
    * @param own_buffer Whether to own the buffer.
    */
-  UcxHeader(
-    const UcxAllocatorContext& mr_ctx, size_t size, bool own_header = true)
-    : mr_ctx_(mr_ctx), header_{nullptr, 0}, own_header_(own_header) {
+  UcxHeader(UcxMemoryResourceManager& mr, size_t size, bool own_header = true)
+    : mr_(&mr), header_{nullptr, 0}, own_header_(own_header) {
     if (size > 0) {
-      header_.data = mr_ctx_.get().mr->allocate(ucx_memory_type::HOST, size);
+      header_.data = mr_->allocate(ucx_memory_type::HOST, size);
       header_.size = size;
     }
   }
 
   UcxHeader(
-    const UcxAllocatorContext& mr_ctx, ucx_header_t&& header,
-    bool own_header = true)
-    : mr_ctx_(mr_ctx), header_(std::move(header)), own_header_(own_header) {}
+    UcxMemoryResourceManager& mr, ucx_header_t&& header, bool own_header = true)
+    : mr_(&mr), header_(std::move(header)), own_header_(own_header) {}
 
   UcxHeader(
-    const UcxAllocatorContext& mr_ctx, const ucx_header_t& header,
+    UcxMemoryResourceManager& mr, const ucx_header_t& header,
     bool own_header = false)
-    : mr_ctx_(mr_ctx), header_(header), own_header_(own_header) {}
+    : mr_(&mr), header_(header), own_header_(own_header) {}
 
   UcxHeader(
-    const UcxAllocatorContext& mr_ctx, const void* header, size_t size,
+    UcxMemoryResourceManager& mr, const void* header, size_t size,
     bool own_header = false)
-    : mr_ctx_(mr_ctx),
+    : mr_(&mr),
       header_({const_cast<void*>(header), size}),
       own_header_(own_header) {}
 
   UcxHeader(UcxHeader&& other, bool own_header)
-    : mr_ctx_(other.mr_ctx_), header_(other.header_), own_header_(own_header) {
+    : mr_(other.mr_), header_(other.header_), own_header_(own_header) {
     other.header_ = {nullptr, 0};
     other.own_header_ = false;
   }
@@ -286,14 +275,7 @@ class UcxHeader {
    */
   ~UcxHeader() {
     if (header_.data && own_header_) {
-      if (mr_ctx_.get().is_alive) {
-        mr_ctx_.get().mr->deallocate(
-          ucx_memory_type::HOST, header_.data, header_.size);
-      } else {
-        std::cerr << "[Axon Fatal Warning] Lifecycle UB Detected: Tensor "
-                     "outlived AxonRuntime! Memory leaked to prevent Segfault."
-                  << std::endl;
-      }
+      mr_->deallocate(ucx_memory_type::HOST, header_.data, header_.size);
       header_ = {nullptr, 0};
       own_header_ = false;
     }
@@ -303,7 +285,7 @@ class UcxHeader {
   UcxHeader& operator=(const UcxHeader&) = delete;
 
   UcxHeader(UcxHeader&& other) noexcept
-    : mr_ctx_(other.mr_ctx_),
+    : mr_(other.mr_),
       header_(other.header_),
       own_header_(std::exchange(other.own_header_, false)) {
     other.header_ = {nullptr, 0};
@@ -312,17 +294,9 @@ class UcxHeader {
   UcxHeader& operator=(UcxHeader&& other) noexcept {
     if (this != &other) {
       if (header_.data && own_header_) {
-        if (mr_ctx_.get().is_alive) {
-          mr_ctx_.get().mr->deallocate(
-            ucx_memory_type::HOST, header_.data, header_.size);
-        } else {
-          std::cerr
-            << "[Axon Fatal Warning] Lifecycle UB Detected: Tensor outlived "
-               "AxonRuntime! Memory leaked to prevent Segfault."
-            << std::endl;
-        }
+        mr_->deallocate(ucx_memory_type::HOST, header_.data, header_.size);
       }
-      mr_ctx_ = other.mr_ctx_;
+      mr_ = other.mr_;
       header_ = other.header_;
       own_header_ = std::exchange(other.own_header_, false);
       other.header_ = {nullptr, 0};
@@ -363,7 +337,7 @@ class UcxHeader {
   bool own_header() const { return own_header_; }
 
  private:
-  std::reference_wrapper<const UcxAllocatorContext> mr_ctx_;
+  UcxMemoryResourceManager* mr_;
   ucx_header_t header_;
   bool own_header_;
 };
@@ -388,10 +362,10 @@ class UcxBufferVec {
    * @param own_buffer Whether to own the buffers.
    */
   explicit UcxBufferVec(
-    const UcxAllocatorContext& mr_ctx, ucx_memory_type_t type,
+    UcxMemoryResourceManager& mr, ucx_memory_type_t type,
     const std::vector<size_t>& sizes, void* mem_h = nullptr,
     bool own_buffer = true, ucp_release_fn_t ucp_release_fn = nullptr)
-    : mr_ctx_(mr_ctx),
+    : mr_(&mr),
       type_(type),
       buffers_(std::vector<ucx_buffer_t>(sizes.size())),
       mem_h_(mem_h),
@@ -399,14 +373,14 @@ class UcxBufferVec {
       ucp_release_fn_(ucp_release_fn) {
     if (sizes.size() > 0) {
       for (size_t i = 0; i < sizes.size(); ++i) {
-        buffers_[i].data = mr_ctx_.get().mr->allocate(type, sizes[i]);
+        buffers_[i].data = mr_->allocate(type, sizes[i]);
         buffers_[i].size = sizes[i];
       }
     }
   }
 
   UcxBufferVec(UcxBufferVec&& other, bool own_buffer)
-    : mr_ctx_(other.mr_ctx_),
+    : mr_(other.mr_),
       type_(other.type_),
       buffers_(std::move(other.buffers_)),
       mem_h_(other.mem_h_),
@@ -423,9 +397,9 @@ class UcxBufferVec {
         for (auto& buf : buffers_) {
           ucp_release_fn_(buf.data);
         }
-      } else if (mr_ctx_.get().is_alive) {
+      } else if (true) {
         for (auto& buf : buffers_) {
-          mr_ctx_.get().mr->deallocate(type_, buf.data, buf.size);
+          mr_->deallocate(type_, buf.data, buf.size);
         }
       } else {
         std::cerr << "[Axon Fatal Warning] Lifecycle UB Detected: Tensor "
@@ -438,7 +412,7 @@ class UcxBufferVec {
   UcxBufferVec(const UcxBufferVec&) = delete;
 
   UcxBufferVec(UcxBufferVec&& other) noexcept
-    : mr_ctx_(other.mr_ctx_),
+    : mr_(other.mr_),
       type_(other.type_),
       buffers_(std::move(other.buffers_)),
       mem_h_(other.mem_h_),
@@ -451,7 +425,7 @@ class UcxBufferVec {
 
   UcxBufferVec& operator=(UcxBufferVec&& other) noexcept {
     if (this != &other) {
-      mr_ctx_ = other.mr_ctx_;
+      mr_ = other.mr_;
       type_ = other.type_;
       buffers_ = std::move(other.buffers_);
       mem_h_ = other.mem_h_;
@@ -468,10 +442,10 @@ class UcxBufferVec {
   UcxBufferVec& operator=(const UcxBufferVec&) = delete;
 
   explicit UcxBufferVec(
-    const UcxAllocatorContext& mr_ctx, ucx_memory_type_t type,
+    UcxMemoryResourceManager& mr, ucx_memory_type_t type,
     std::vector<ucx_buffer_t>&& buffers, void* mem_h = nullptr,
     bool own_buffer = false, ucp_release_fn_t ucp_release_fn = nullptr)
-    : mr_ctx_(mr_ctx),
+    : mr_(&mr),
       type_(type),
       buffers_(std::move(buffers)),
       mem_h_(mem_h),
@@ -479,10 +453,10 @@ class UcxBufferVec {
       ucp_release_fn_(ucp_release_fn) {}
 
   explicit UcxBufferVec(
-    const UcxAllocatorContext& mr_ctx, ucx_memory_type_t type,
+    UcxMemoryResourceManager& mr, ucx_memory_type_t type,
     const std::vector<ucx_buffer_t>& buffers, void* mem_h = nullptr,
     bool own_buffer = false, ucp_release_fn_t ucp_release_fn = nullptr)
-    : mr_ctx_(mr_ctx),
+    : mr_(&mr),
       type_(type),
       buffers_(buffers),
       mem_h_(mem_h),
@@ -490,7 +464,7 @@ class UcxBufferVec {
       ucp_release_fn_(ucp_release_fn) {}
 
   explicit UcxBufferVec(std::vector<UcxBuffer>&& buffers)
-    : mr_ctx_(buffers[0].mr_ctx_),
+    : mr_(buffers[0].mr_),
       type_(buffers[0].type()),
       mem_h_(buffers[0].mem_h()),
       own_buffer_(buffers[0].own_buffer()),
@@ -502,7 +476,7 @@ class UcxBufferVec {
   }
 
   explicit UcxBufferVec(UcxBuffer&& buffer)
-    : mr_ctx_(buffer.mr_ctx_),
+    : mr_(buffer.mr_),
       type_(buffer.type()),
       mem_h_(buffer.mem_h()),
       own_buffer_(buffer.own_buffer()),
@@ -632,7 +606,7 @@ class UcxBufferVec {
     result.reserve(buffers_.size());
     for (auto& buf : buffers_) {
       result.emplace_back(
-        mr_ctx_, type_, buf, mem_h_, own_buffer_, ucp_release_fn_);
+        *mr_, type_, buf, mem_h_, own_buffer_, ucp_release_fn_);
     }
     own_buffer_ = false;
     return result;
@@ -646,11 +620,11 @@ class UcxBufferVec {
 
  private:
   explicit UcxBufferVec(
-    const UcxAllocatorContext& mr_ctx, ucx_memory_type_t type,
+    UcxMemoryResourceManager& mr, ucx_memory_type_t type,
     std::vector<ucx_buffer_t>&& buffers, void* mem_h, bool own_buffer,
     ucp_release_fn_t&& ucp_release_fn,
     std::unique_ptr<UcxBuffer>&& backing_buffer)
-    : mr_ctx_(mr_ctx),
+    : mr_(&mr),
       type_(type),
       buffers_(std::move(buffers)),
       mem_h_(mem_h),
@@ -658,7 +632,7 @@ class UcxBufferVec {
       ucp_release_fn_(std::move(ucp_release_fn)),
       backing_buffer_(std::move(backing_buffer)) {}
 
-  std::reference_wrapper<const UcxAllocatorContext> mr_ctx_;
+  UcxMemoryResourceManager* mr_;
   ucx_memory_type_t type_;
   std::vector<ucx_buffer_t> buffers_;
   void* mem_h_;
@@ -687,8 +661,8 @@ inline UcxBufferVec UcxBuffer::to_buffer_vec(
   // Set own_buffer_ to false since the backing_buffer now owns the memory.
   // The UcxBufferVec's destructor will not try to deallocate the chunks.
   auto vec = UcxBufferVec(
-    mr_ctx_, type_, std::move(buffers), mem_h_, false,
-    std::move(ucp_release_fn_), std::move(backing_buffer));
+    *mr_, type_, std::move(buffers), mem_h_, false, std::move(ucp_release_fn_),
+    std::move(backing_buffer));
 
   return vec;
 }
@@ -712,10 +686,10 @@ class UcxAmData {
    * @param own_buffer Whether to own the buffer.
    */
   UcxAmData(
-    const UcxAllocatorContext& mr_ctx, size_t header_size, size_t buffer_size,
+    UcxMemoryResourceManager& mr, size_t header_size, size_t buffer_size,
     ucx_memory_type_t buffer_type, bool own_header = true,
     bool own_buffer = true, ucp_release_fn_t ucp_release_fn = nullptr)
-    : mr_ctx_(mr_ctx),
+    : mr_(&mr),
       data_{},
       own_header_(own_header),
       own_buffer_(own_buffer),
@@ -723,15 +697,14 @@ class UcxAmData {
     data_.buffer_type = buffer_type;
 
     if (header_size > 0 && own_header) {
-      data_.header.data =
-        mr_ctx_.get().mr->allocate(ucx_memory_type::HOST, header_size);
+      data_.header.data = mr_->allocate(ucx_memory_type::HOST, header_size);
       data_.header.size = header_size;
     }
 
     // Initialize buffer size regardless of own_buffer flag
     // When own_buffer is true, we also allocate memory
     if (buffer_size > 0 && own_buffer) {
-      data_.buffer.data = mr_ctx_.get().mr->allocate(buffer_type, buffer_size);
+      data_.buffer.data = mr_->allocate(buffer_type, buffer_size);
       data_.buffer.size = buffer_size;
     } else {
       // When own_buffer is false, we still need to initialize buffer.size
@@ -743,27 +716,26 @@ class UcxAmData {
   }
 
   UcxAmData(
-    const UcxAllocatorContext& mr_ctx, ucx_am_data_t&& data,
-    bool own_header = true, bool own_buffer = true,
-    ucp_release_fn_t ucp_release_fn = nullptr)
-    : mr_ctx_(mr_ctx),
+    UcxMemoryResourceManager& mr, ucx_am_data_t&& data, bool own_header = true,
+    bool own_buffer = true, ucp_release_fn_t ucp_release_fn = nullptr)
+    : mr_(&mr),
       data_(std::move(data)),
       own_header_(own_header),
       own_buffer_(own_buffer),
       ucp_release_fn_(std::move(ucp_release_fn)) {}
 
   UcxAmData(
-    const UcxAllocatorContext& mr_ctx, const ucx_am_data_t& data,
+    UcxMemoryResourceManager& mr, const ucx_am_data_t& data,
     bool own_header = false, bool own_buffer = false,
     ucp_release_fn_t ucp_release_fn = nullptr)
-    : mr_ctx_(mr_ctx),
+    : mr_(&mr),
       data_(data),
       own_header_(own_header),
       own_buffer_(own_buffer),
       ucp_release_fn_(ucp_release_fn) {}
 
   UcxAmData(UcxAmData&& other, bool own_header, bool own_buffer)
-    : mr_ctx_(other.mr_ctx_),
+    : mr_(other.mr_),
       data_(std::move(other.data_)),
       own_header_(own_header),
       own_buffer_(own_buffer),
@@ -778,7 +750,7 @@ class UcxAmData {
   UcxAmData& operator=(const UcxAmData&) = delete;
 
   UcxAmData(UcxAmData&& other) noexcept
-    : mr_ctx_(other.mr_ctx_),
+    : mr_(other.mr_),
       data_(other.data_),
       own_header_(other.own_header_),
       own_buffer_(other.own_buffer_),
@@ -791,7 +763,7 @@ class UcxAmData {
 
   UcxAmData& operator=(UcxAmData&& other) noexcept {
     if (this != &other) {
-      mr_ctx_ = other.mr_ctx_;
+      mr_ = other.mr_;
       data_ = other.data_;
       own_header_ = other.own_header_;
       own_buffer_ = other.own_buffer_;
@@ -808,25 +780,15 @@ class UcxAmData {
    */
   ~UcxAmData() {
     if (data_.header.data && own_header_) {
-      if (mr_ctx_.get().is_alive) {
-        mr_ctx_.get().mr->deallocate(
-          ucx_memory_type::HOST, data_.header.data, data_.header.size);
-      } else {
-        std::cerr << "[Axon Fatal Warning] Lifecycle UB Detected: Tensor "
-                     "outlived AxonRuntime! Memory leaked to prevent Segfault."
-                  << std::endl;
-      }
+      mr_->deallocate(
+        ucx_memory_type::HOST, data_.header.data, data_.header.size);
     }
     if (data_.buffer.data && own_buffer_) {
       if (ucp_release_fn_) {
         ucp_release_fn_(data_.buffer.data);
-      } else if (mr_ctx_.get().is_alive) {
-        mr_ctx_.get().mr->deallocate(
-          data_.buffer_type, data_.buffer.data, data_.buffer.size);
       } else {
-        std::cerr << "[Axon Fatal Warning] Lifecycle UB Detected: Tensor "
-                     "outlived AxonRuntime! Memory leaked to prevent Segfault."
-                  << std::endl;
+        mr_->deallocate(
+          data_.buffer_type, data_.buffer.data, data_.buffer.size);
       }
     }
   }
@@ -860,7 +822,7 @@ class UcxAmData {
   }
 
  private:
-  std::reference_wrapper<const UcxAllocatorContext> mr_ctx_;
+  UcxMemoryResourceManager* mr_;
   ucx_am_data_t data_;
   bool own_header_;
   bool own_buffer_;
@@ -886,25 +848,21 @@ class UcxAmIovec {
    * @param own_buffer Whether to own the buffer.
    */
   UcxAmIovec(
-    const UcxAllocatorContext& mr_ctx, size_t header_size,
+    UcxMemoryResourceManager& mr, size_t header_size,
     const std::vector<size_t>& buffer_sizes, ucx_memory_type_t buffer_type,
     bool own_header = true, bool own_buffer = true)
-    : mr_ctx_(mr_ctx),
-      iovec_{},
-      own_header_(own_header),
-      own_buffer_(own_buffer) {
+    : mr_(&mr), iovec_{}, own_header_(own_header), own_buffer_(own_buffer) {
     iovec_.buffer_type = buffer_type;
     iovec_.buffer_count = buffer_sizes.size();
 
     if (header_size > 0 && own_header) {
-      iovec_.header.data =
-        mr_ctx_.get().mr->allocate(ucx_memory_type::HOST, header_size);
+      iovec_.header.data = mr_->allocate(ucx_memory_type::HOST, header_size);
       iovec_.header.size = header_size;
     }
 
     if (iovec_.buffer_count > 0) {
       // Allocate the buffer_vec array (needed to store buffer metadata)
-      iovec_.buffer_vec = static_cast<ucx_buffer_t*>(mr_ctx_.get().mr->allocate(
+      iovec_.buffer_vec = static_cast<ucx_buffer_t*>(mr_->allocate(
         ucx_memory_type::HOST, sizeof(ucx_buffer_t) * iovec_.buffer_count));
 
       // Initialize each buffer in the vector
@@ -912,7 +870,7 @@ class UcxAmIovec {
         if (buffer_sizes[i] > 0 && own_buffer) {
           // Allocate memory and set size when we own the buffer
           iovec_.buffer_vec[i].data =
-            mr_ctx_.get().mr->allocate(buffer_type, buffer_sizes[i]);
+            mr_->allocate(buffer_type, buffer_sizes[i]);
           iovec_.buffer_vec[i].size = buffer_sizes[i];
         } else {
           // When own_buffer is false, we still need to initialize buffer.size
@@ -926,23 +884,23 @@ class UcxAmIovec {
   }
 
   UcxAmIovec(
-    const UcxAllocatorContext& mr_ctx, ucx_am_iovec_t&& iovec,
+    UcxMemoryResourceManager& mr, ucx_am_iovec_t&& iovec,
     bool own_header = true, bool own_buffer = true)
-    : mr_ctx_(mr_ctx),
+    : mr_(&mr),
       iovec_(std::move(iovec)),
       own_header_(own_header),
       own_buffer_(own_buffer) {}
 
   UcxAmIovec(
-    const UcxAllocatorContext& mr_ctx, const ucx_am_iovec_t& iovec,
+    UcxMemoryResourceManager& mr, const ucx_am_iovec_t& iovec,
     bool own_header = false, bool own_buffer = false)
-    : mr_ctx_(mr_ctx),
+    : mr_(&mr),
       iovec_(iovec),
       own_header_(own_header),
       own_buffer_(own_buffer) {}
 
   UcxAmIovec(UcxAmIovec&& other, bool own_header, bool own_buffer)
-    : mr_ctx_(other.mr_ctx_),
+    : mr_(other.mr_),
       iovec_(other.iovec_),
       own_header_(own_header),
       own_buffer_(own_buffer) {
@@ -956,39 +914,20 @@ class UcxAmIovec {
    */
   ~UcxAmIovec() {
     if (iovec_.header.data && own_header_) {
-      if (mr_ctx_.get().is_alive) {
-        mr_ctx_.get().mr->deallocate(
-          ucx_memory_type::HOST, iovec_.header.data, iovec_.header.size);
-      } else {
-        std::cerr << "[Axon Fatal Warning] Lifecycle UB Detected: Tensor "
-                     "outlived AxonRuntime! Memory leaked to prevent Segfault."
-                  << std::endl;
-      }
+      mr_->deallocate(
+        ucx_memory_type::HOST, iovec_.header.data, iovec_.header.size);
     }
     if (iovec_.buffer_vec && own_buffer_) {
       for (size_t i = 0; i < iovec_.buffer_count; ++i) {
         if (iovec_.buffer_vec[i].data) {
-          if (mr_ctx_.get().is_alive) {
-            mr_ctx_.get().mr->deallocate(
-              iovec_.buffer_type, iovec_.buffer_vec[i].data,
-              iovec_.buffer_vec[i].size);
-          } else {
-            std::cerr
-              << "[Axon Fatal Warning] Lifecycle UB Detected: Tensor outlived "
-                 "AxonRuntime! Memory leaked to prevent Segfault."
-              << std::endl;
-          }
+          mr_->deallocate(
+            iovec_.buffer_type, iovec_.buffer_vec[i].data,
+            iovec_.buffer_vec[i].size);
         }
       }
-      if (mr_ctx_.get().is_alive) {
-        mr_ctx_.get().mr->deallocate(
-          ucx_memory_type::HOST, iovec_.buffer_vec,
-          sizeof(ucx_buffer_t) * iovec_.buffer_count);
-      } else {
-        std::cerr << "[Axon Fatal Warning] Lifecycle UB Detected: Tensor "
-                     "outlived AxonRuntime! Memory leaked to prevent Segfault."
-                  << std::endl;
-      }
+      mr_->deallocate(
+        ucx_memory_type::HOST, iovec_.buffer_vec,
+        sizeof(ucx_buffer_t) * iovec_.buffer_count);
     }
   }
 
@@ -996,7 +935,7 @@ class UcxAmIovec {
   UcxAmIovec& operator=(const UcxAmIovec&) = delete;
 
   UcxAmIovec(UcxAmIovec&& other) noexcept
-    : mr_ctx_(other.mr_ctx_),
+    : mr_(other.mr_),
       iovec_(other.iovec_),
       own_header_(other.own_header_),
       own_buffer_(other.own_buffer_) {
@@ -1007,7 +946,7 @@ class UcxAmIovec {
 
   UcxAmIovec& operator=(UcxAmIovec&& other) noexcept {
     if (this != &other) {
-      mr_ctx_ = other.mr_ctx_;
+      mr_ = other.mr_;
       iovec_ = other.iovec_;
       own_header_ = other.own_header_;
       own_buffer_ = other.own_buffer_;
@@ -1039,7 +978,7 @@ class UcxAmIovec {
   bool own_buffer() const { return own_buffer_; }
 
  private:
-  std::reference_wrapper<const UcxAllocatorContext> mr_ctx_;
+  UcxMemoryResourceManager* mr_;
   ucx_am_iovec_t iovec_;
   bool own_header_;
   bool own_buffer_;

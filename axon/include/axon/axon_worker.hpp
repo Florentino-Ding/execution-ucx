@@ -1326,13 +1326,13 @@ auto AxonWorker::InvokeRpc(
     return InvokeRpcImpl<PayloadT, RespBufferT, MemPolicyT>(
       conn_id, std::move(request_header),
       std::move(payload).value_or(
-        PayloadT{mr_.get().context(), ucx_memory_type::HOST, 0}),
+        PayloadT{mr_.get(), ucx_memory_type::HOST, 0}),
       std::move(mem_policy));
   } else if constexpr (std::is_same_v<PayloadT, ucxx::UcxBufferVec>) {
     return InvokeRpcImpl<PayloadT, RespBufferT, MemPolicyT>(
       conn_id, std::move(request_header),
-      std::move(payload).value_or(PayloadT{
-        mr_.get().context(), ucx_memory_type::HOST, std::vector<size_t>{0}}),
+      std::move(payload).value_or(
+        PayloadT{mr_.get(), ucx_memory_type::HOST, std::vector<size_t>{0}}),
       std::move(mem_policy));
   } else {
     return InvokeRpcImpl<std::monostate, RespBufferT, MemPolicyT>(

@@ -281,7 +281,7 @@ std::chrono::milliseconds ConvertTimeout(nb::object timeout_obj) {
 
 // HandleRpcSuccessResult instantiations
 template void HandleRpcSuccessResult<std::monostate>(
-  const ucxx::UcxAllocatorContext& mr_ctx, SharedPyObject future,
+  ucxx::UcxMemoryResourceManager& mr, SharedPyObject future,
   PythonWakeManager& manager,
   std::unique_ptr<
     const rpc::RpcResponseHeader, rpc::UcxDataDeleter<ucxx::UcxHeader>>
@@ -289,7 +289,7 @@ template void HandleRpcSuccessResult<std::monostate>(
   std::monostate&& returned_payload, SharedPyObject from_dlpack_fn);
 
 template void HandleRpcSuccessResult<ucxx::UcxBuffer>(
-  const ucxx::UcxAllocatorContext& mr_ctx, SharedPyObject future,
+  ucxx::UcxMemoryResourceManager& mr, SharedPyObject future,
   PythonWakeManager& manager,
   std::unique_ptr<
     const rpc::RpcResponseHeader, rpc::UcxDataDeleter<ucxx::UcxHeader>>
@@ -297,7 +297,7 @@ template void HandleRpcSuccessResult<ucxx::UcxBuffer>(
   ucxx::UcxBuffer&& returned_payload, SharedPyObject from_dlpack_fn);
 
 template void HandleRpcSuccessResult<ucxx::UcxBufferVec>(
-  const ucxx::UcxAllocatorContext& mr_ctx, SharedPyObject future,
+  ucxx::UcxMemoryResourceManager& mr, SharedPyObject future,
   PythonWakeManager& manager,
   std::unique_ptr<
     const rpc::RpcResponseHeader, rpc::UcxDataDeleter<ucxx::UcxHeader>>
@@ -305,7 +305,7 @@ template void HandleRpcSuccessResult<ucxx::UcxBufferVec>(
   ucxx::UcxBufferVec&& returned_payload, SharedPyObject from_dlpack_fn);
 
 template void HandleRpcSuccessResult<rpc::PayloadVariant>(
-  const ucxx::UcxAllocatorContext& mr_ctx, SharedPyObject future,
+  ucxx::UcxMemoryResourceManager& mr, SharedPyObject future,
   PythonWakeManager& manager,
   std::unique_ptr<
     const rpc::RpcResponseHeader, rpc::UcxDataDeleter<ucxx::UcxHeader>>

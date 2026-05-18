@@ -19,9 +19,7 @@ limitations under the License.
 #define UCX_MEMORY_RESOURCE_HPP_
 
 #include <array>
-#include <atomic>
 #include <functional>
-#include <memory>
 #include <memory_resource>
 #include <optional>
 #include <type_traits>
@@ -33,11 +31,6 @@ namespace ucxx {
 
 class UcxMemoryResourceManager;
 
-struct UcxAllocatorContext {
-  UcxMemoryResourceManager* mr;
-  std::atomic<bool> is_alive;
-};
-
 /**
  * @brief Base class for managing different types of memory resources in UCX
  * context
@@ -48,10 +41,8 @@ struct UcxAllocatorContext {
  */
 class UcxMemoryResourceManager {
  public:
-  UcxMemoryResourceManager() : allocator_context_{this, true} {}
-  virtual ~UcxMemoryResourceManager() { allocator_context_.is_alive = false; }
-
-  const UcxAllocatorContext& context() const { return allocator_context_; }
+  UcxMemoryResourceManager() = default;
+  virtual ~UcxMemoryResourceManager() = default;
 
   static constexpr const size_t UCX_MEMORY_TYPE_COUNT =
     static_cast<std::underlying_type_t<ucx_memory_type>>(ucx_memory_type::LAST)
@@ -143,8 +134,6 @@ class UcxMemoryResourceManager {
       std::function<void*(void*, const void*, size_t)>, UCX_MEMORY_TYPE_COUNT>,
     UCX_MEMORY_TYPE_COUNT>
     memcpy_fns_;  // [src_type][dest_type]
-
-  UcxAllocatorContext allocator_context_;
 };
 
 /**

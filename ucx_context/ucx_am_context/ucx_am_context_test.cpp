@@ -679,7 +679,7 @@ class UcxAmTest : public ::testing::Test {
     auto testFloatVec = create_float_test_data(floatDataSize);
 
     ucx_am_data sendData{};
-    UcxAmData recvDataWrapper(default_mr_->context(), 0, 0, test_memory_type);
+    UcxAmData recvDataWrapper(*default_mr_, 0, 0, test_memory_type);
     sendData.header.data = headerData.data();
     sendData.header.size = headerData.size();
     sendData.buffer.data = testFloatVec.data();
@@ -844,7 +844,7 @@ class UcxAmTest : public ::testing::Test {
           std::cerr << "Error in biDiClientSendRecvTask: " << e.what()
                     << std::endl;
         }
-        co_return UcxAmData(default_mr_->context(), 0, 0, sendData.buffer_type);
+        co_return UcxAmData(*default_mr_, 0, 0, sendData.buffer_type);
       });
 
     co_await scope.join();
@@ -941,7 +941,7 @@ class UcxAmTest : public ::testing::Test {
     auto testFloatVec = create_float_test_data(floatDataSize);
 
     ucx_am_data sendData{};
-    UcxAmData recvDataWrapper(default_mr_->context(), 0, 0, test_memory_type);
+    UcxAmData recvDataWrapper(*default_mr_, 0, 0, test_memory_type);
     sendData.header.data = headerData.data();
     sendData.header.size = headerData.size();
     sendData.buffer.data = testFloatVec.data();
@@ -1573,7 +1573,7 @@ void UcxAmTest::runUcpAddressHeaderBufferTestLogic(
   UcxMemoryResourceManager* server_mr_ptr = server.get_memory_resource().get();
   UcxMemoryResourceManager* client_mr_ptr = client.get_memory_resource().get();
 
-  UcxAmData recvDataWrapper(server_mr_ptr->context(), 0, 0, test_memory_type);
+  UcxAmData recvDataWrapper(*server_mr_ptr, 0, 0, test_memory_type);
 
   // Prepare data based on use_iovec flag
   std::variant<std::monostate, UcxAmData, UcxAmIovec> sendData;
@@ -1643,7 +1643,7 @@ void UcxAmTest::runUcpAddressHeaderBufferTestLogic(
 
       // Emplace the wrapper into variant by moving from holder
       sendData = UcxAmIovec(
-        client_mr_ptr->context(), std::move(raw), /*own_header=*/false,
+        *client_mr_ptr, std::move(raw), /*own_header=*/false,
         /*own_buffer=*/false);
     } else {
       ucx_am_data_t raw{};
@@ -1655,7 +1655,7 @@ void UcxAmTest::runUcpAddressHeaderBufferTestLogic(
       raw.mem_h = nullptr;
 
       sendData = UcxAmData(
-        client_mr_ptr->context(), std::move(raw), /*own_header=*/false,
+        *client_mr_ptr, std::move(raw), /*own_header=*/false,
         /*own_buffer=*/false);
     }
   } else {
@@ -1664,8 +1664,7 @@ void UcxAmTest::runUcpAddressHeaderBufferTestLogic(
     auto& holderPtr = g_holders.back();
     if (use_iovec) {
       UcxAmIovec allocWrapper(
-        client_mr_ptr->context(), /*header_size=*/0, buffer_sizes,
-        test_memory_type,
+        *client_mr_ptr, /*header_size=*/0, buffer_sizes, test_memory_type,
         /*own_header=*/false, /*own_buffer=*/true);
       // header copy free
       allocWrapper.get()->header.data = holderPtr->header->data();
@@ -1681,7 +1680,7 @@ void UcxAmTest::runUcpAddressHeaderBufferTestLogic(
       sendData = std::move(allocWrapper);
     } else {
       UcxAmData allocWrapper(
-        client_mr_ptr->context(), /*header_size=*/0,
+        *client_mr_ptr, /*header_size=*/0,
         /*buffer_size=*/totalFloatCount * sizeof(float), test_memory_type,
         /*own_header=*/false, /*own_buffer=*/true);
       // header copy free
@@ -1746,7 +1745,7 @@ void UcxAmTest::runUcpAddressHeaderBufferTestLogic(
                  } else {
                    // Receive by key using vector of UcxBuffer
                    UcxBufferVec buffers(
-                     server.get_memory_resource()->context(), test_memory_type,
+                     *server.get_memory_resource(), test_memory_type,
                      recv_info.buffer_sizes);
 
                    auto buffer_bundle = co_await connection_recv_buffer(
@@ -1860,7 +1859,7 @@ void UcxAmTest::runUcpAddressHeaderBufferTestLogic(
           std::cerr << "Error in client task: " << e.what() << std::endl;
         }
         co_return UcxAmData(
-          client.get_memory_resource()->context(), 0, 0, test_memory_type);
+          *client.get_memory_resource(), 0, 0, test_memory_type);
       });
 
     co_await scope.join();

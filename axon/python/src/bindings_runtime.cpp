@@ -162,35 +162,12 @@ void RegisterRuntime(nb::module_& m) {
       if (!memory_manager_obj.is_none()) {
         auto* raw =
           nb::cast<ucxx::UcxMemoryResourceManager*>(memory_manager_obj);
-        nb::object kept_alive = memory_manager_obj;
+        // No-op deleter: Python (via nb::keep_alive<0, 5>) owns the lifetime.
+        // nanobind guarantees memory_manager_obj is not GC'd until after the
+        // AxonRuntime instance is destroyed, so the raw pointer remains valid
+        // for the entire lifetime of the shared_ptr.
         auto mr = std::shared_ptr<ucxx::UcxMemoryResourceManager>(
-          raw, [kept_alive = std::move(kept_alive)](
-                 ucxx::UcxMemoryResourceManager*) mutable {
-            if (Py_IsInitialized()) {
-              nb::gil_scoped_acquire gil;
-              kept_alive = nb::object{};
-            } else {
-              // Here, when the interpreter is shut down before
-              // Acquire the GIL before releasing the Python object to prevent
-              // segfaults if this hook is executed on a background thread or
-              // during shutdown.
-              bool is_finalizing = false;
-#if PY_VERSION_HEX >= 0x030d0000
-              is_finalizing = Py_IsFinalizing();
-#else
-              is_finalizing = _Py_IsFinalizing();
-#endif
-              if (!is_finalizing) {
-                nb::gil_scoped_acquire acquire;
-                kept_alive.reset();
-              } else {
-                // If Python is finalizing, it's not safe to acquire GIL or
-                // decref. Just leak the reference (OS will clean up memory) by
-                // moving it to a heap allocated object that is never deleted.
-                new nb::object(std::move(kept_alive));
-              }
-            }
-          });
+          raw, [](ucxx::UcxMemoryResourceManager*) {});
         new (self) axon::AxonRuntime(
           std::move(mr), worker_name, thread_pool_size,
           python::ConvertTimeout(timeout_obj), std::move(device_context));
@@ -204,7 +181,11 @@ void RegisterRuntime(nb::module_& m) {
     nb::arg("thread_pool_size") =
       (std::thread::hardware_concurrency() < 16 ? 4 : 16),
     nb::arg("timeout") = nb::none(), nb::arg("device") = nb::none(),
-    nb::arg("resource_manager") = nb::none());
+    nb::arg("resource_manager") = nb::none(),
+    // Keep resource_manager (arg 5) alive for at least as long as the
+    // AxonRuntime instance (arg 0), preventing GC from releasing it while
+    // the C++ shared_ptr still holds a raw pointer into it.
+    nb::keep_alive<0, 5>());
 
   cls.def("__del__", [](axon::AxonRuntime& self) {
     nb::gil_scoped_release release;
@@ -860,7 +841,7 @@ void RegisterRuntime(nb::module_& m) {
 
       // Create result handler
       auto result_handler = python::CreateRpcResultHandler(
-        self.GetMemoryResourceManagerShared()->context(), future,
+        *self.GetMemoryResourceManagerShared(), future,
         python::GetPythonWakeManager());
 
       // Determine if using custom memory policy
@@ -878,14 +859,13 @@ void RegisterRuntime(nb::module_& m) {
           try {
             auto mr = self.GetMemoryResourceManager();
             if (payload_info.type == python::PayloadTypeInfo::UCX_BUFFER) {
-              ucxx::UcxBuffer buffer = python::CreateUcxBufferFromPayload(
-                payload_obj, mr.get().context());
+              ucxx::UcxBuffer buffer =
+                python::CreateUcxBufferFromPayload(payload_obj, mr.get());
               handler(std::move(buffer));
             } else if (
               payload_info.type == python::PayloadTypeInfo::UCX_BUFFER_VEC) {
               ucxx::UcxBufferVec buffer_vec =
-                python::CreateUcxBufferVecFromPayload(
-                  payload_obj, mr.get().context());
+                python::CreateUcxBufferVecFromPayload(payload_obj, mr.get());
               handler(std::move(buffer_vec));
             } else {
               handler(std::monostate{});
@@ -985,7 +965,7 @@ void RegisterRuntime(nb::module_& m) {
       // Prepare for dispatch
       bool use_custom_memory = !memory_policy_factory.is_none();
       auto result_handler = python::CreateRpcResultHandler(
-        self.GetMemoryResourceManagerShared()->context(), future,
+        *self.GetMemoryResourceManagerShared(), future,
         python::GetPythonWakeManager(), std::move(from_dlpack_fn));
 
       // Dispatch based on tensor count
@@ -1001,7 +981,7 @@ void RegisterRuntime(nb::module_& m) {
         }
       } else if (ctx.tensor_count() == 1) {
         ucxx::UcxBuffer buffer =
-          ctx.to_ucx_buffer(self.GetMemoryResourceManager().get().context());
+          ctx.to_ucx_buffer(self.GetMemoryResourceManager().get());
         if (use_custom_memory) {
           self.SpawnClientTask(python::InvokeRpcWithCustomMemory(
             self, worker_name, std::move(request_header), std::move(buffer),
@@ -1012,8 +992,8 @@ void RegisterRuntime(nb::module_& m) {
             std::move(result_handler)));
         }
       } else {
-        ucxx::UcxBufferVec buffer_vec = ctx.to_ucx_buffer_vec(
-          self.GetMemoryResourceManager().get().context());
+        ucxx::UcxBufferVec buffer_vec =
+          ctx.to_ucx_buffer_vec(self.GetMemoryResourceManager().get());
         if (use_custom_memory) {
           self.SpawnClientTask(python::InvokeRpcWithCustomMemory(
             self, worker_name, std::move(request_header), std::move(buffer_vec),

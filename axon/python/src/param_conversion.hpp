@@ -69,11 +69,11 @@ nb::dict HeaderToDict(const rpc::RpcResponseHeader& header);
 
 // Helper functions for tensor conversion (implemented in cpp)
 nb::object ConvertTensorResult(
-  const ucxx::UcxAllocatorContext& mr_ctx, const rpc::ParamMeta& param,
+  ucxx::UcxMemoryResourceManager& mr, const rpc::ParamMeta& param,
   ucxx::UcxBuffer&& payload, const nb::object& from_dlpack_fn);
 
 nb::object ConvertTensorResult(
-  const ucxx::UcxAllocatorContext& mr_ctx, const rpc::ParamMeta& param,
+  ucxx::UcxMemoryResourceManager& mr, const rpc::ParamMeta& param,
   ucxx::UcxBufferVec&& payload, const nb::object& from_dlpack_fn);
 
 // Converts a vector of ParamMeta (results) to a Python list
@@ -81,7 +81,7 @@ nb::object ConvertTensorResult(
 // tensors
 template <typename PayloadT = std::monostate>
 nb::tuple ResultsToPythonTuple(
-  const ucxx::UcxAllocatorContext& mr_ctx,
+  ucxx::UcxMemoryResourceManager& mr,
   const cista::offset::vector<rpc::ParamMeta>& params,
   PayloadT&& payload = std::monostate{},
   const nb::object& from_dlpack_fn = nb::none()) {
@@ -92,7 +92,7 @@ nb::tuple ResultsToPythonTuple(
     return std::visit(
       [&](auto&& inner) {
         return ResultsToPythonTuple(
-          mr_ctx, params, std::forward<decltype(inner)>(inner), from_dlpack_fn);
+          mr, params, std::forward<decltype(inner)>(inner), from_dlpack_fn);
       },
       std::forward<PayloadT>(payload));
   }
@@ -103,8 +103,8 @@ nb::tuple ResultsToPythonTuple(
     if (param.type == rpc::ParamType::TENSOR_META) {
       if constexpr (std::is_same_v<std::decay_t<PayloadT>, ucxx::UcxBuffer>) {
         // Single tensor payload
-        nb::object tensor = ConvertTensorResult(
-          mr_ctx, param, std::move(payload), from_dlpack_fn);
+        nb::object tensor =
+          ConvertTensorResult(mr, param, std::move(payload), from_dlpack_fn);
         result.append(std::move(tensor));
       } else {
         // No valid payload for tensor
@@ -115,8 +115,8 @@ nb::tuple ResultsToPythonTuple(
       if constexpr (std::is_same_v<
                       std::decay_t<PayloadT>, ucxx::UcxBufferVec>) {
         // Multiple tensor payload
-        nb::object tensors = ConvertTensorResult(
-          mr_ctx, param, std::move(payload), from_dlpack_fn);
+        nb::object tensors =
+          ConvertTensorResult(mr, param, std::move(payload), from_dlpack_fn);
         result.extend(std::move(tensors));
       } else {
         // No valid payload for tensor
@@ -135,7 +135,7 @@ nb::tuple ResultsToPythonTuple(
 
 template <typename PayloadT = std::monostate>
 nb::object ResultsToPython(
-  const ucxx::UcxAllocatorContext& mr_ctx,
+  ucxx::UcxMemoryResourceManager& mr,
   const cista::offset::vector<rpc::ParamMeta>& params,
   PayloadT&& payload = std::monostate{},
   const nb::object& from_dlpack_fn = nb::none()) {
@@ -145,7 +145,7 @@ nb::object ResultsToPython(
     return std::visit(
       [&](auto&& inner) {
         return ResultsToPython(
-          mr_ctx, params, std::forward<decltype(inner)>(inner), from_dlpack_fn);
+          mr, params, std::forward<decltype(inner)>(inner), from_dlpack_fn);
       },
       std::forward<PayloadT>(payload));
   }
@@ -157,7 +157,7 @@ nb::object ResultsToPython(
           "Invalid payload type for tensor when result type is TENSOR_META");
       } else {
         return ConvertTensorResult(
-          mr_ctx, params[0], std::move(payload), from_dlpack_fn);
+          mr, params[0], std::move(payload), from_dlpack_fn);
       }
     } else if (params[0].type == rpc::ParamType::TENSOR_META_VEC) {
       if constexpr (!std::is_same_v<PayloadType, ucxx::UcxBufferVec>) {
@@ -166,14 +166,14 @@ nb::object ResultsToPython(
           "TENSOR_META_VEC");
       } else {
         return ConvertTensorResult(
-          mr_ctx, params[0], std::move(payload), from_dlpack_fn);
+          mr, params[0], std::move(payload), from_dlpack_fn);
       }
     } else {
       return ResultMetaToPython(params[0]);
     }
   } else if (params.size() > 1) {
     return ResultsToPythonTuple(
-      mr_ctx, params, std::forward<PayloadT>(payload), from_dlpack_fn);
+      mr, params, std::forward<PayloadT>(payload), from_dlpack_fn);
   }
   return nb::none();
 }

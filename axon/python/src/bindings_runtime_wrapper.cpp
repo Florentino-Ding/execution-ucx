@@ -81,8 +81,7 @@ nb::object PythonAsyncFunctionWrapper::ConvertSingleParamToPython(
   }
 
   nb::object dltensor_capsule = TensorMetaToDlpack(
-    self.GetMemoryResourceManagerShared()->context(), std::move(meta),
-    std::move(buffer));
+    *self.GetMemoryResourceManagerShared(), std::move(meta), std::move(buffer));
 
   if (tensor_param_idx < tensor_param_from_dlpack.size()) {
     const auto& from_dlpack_ref = tensor_param_from_dlpack[tensor_param_idx];
@@ -387,7 +386,7 @@ PythonAsyncFunctionWrapper::ConvertTensorReturns(
   // Create UcxBufferVec with owners to keep data alive
   auto mr = self.GetMemoryResourceManager();
   ucxx::UcxBuffer buffer(
-    mr.get().context(), mem_type, data_ptr, size, nullptr, true,
+    mr.get(), mem_type, data_ptr, size, nullptr, true,
     [owner = SharedPyObject(std::move(owner))](void*) {});
 
   rpc::ParamMeta meta_param;
@@ -470,7 +469,7 @@ std::pair<rpc::ParamMeta, rpc::ReturnedPayload> ConvertTensorReturnsImpl(
   // Create UcxBufferVec with owners to keep data alive
   auto mr = self.GetMemoryResourceManager();
   ucxx::UcxBufferVec buffer_vec(
-    mr.get().context(), mem_type, std::move(buffers), nullptr, true,
+    mr.get(), mem_type, std::move(buffers), nullptr, true,
     [owners = std::move(owners)](void*) {});
 
   rpc::ParamMeta meta_param;
