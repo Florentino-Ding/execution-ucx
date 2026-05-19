@@ -289,7 +289,11 @@ void UcxConnection::disconnect_direct() {
     UcxRequest *request, *tmp;
     ucs_list_for_each_safe(request, tmp, &all_requests_, pos) {
       ucs_list_del(&request->pos);
-      ucp_request_free(request);
+      if (request->callback) {
+        (*request->callback)(UCS_ERR_CANCELED);
+        request->callback = nullptr;
+      }
+      request->conn = std::nullopt;
     }
   }
 
@@ -449,6 +453,19 @@ std::tuple<ucs_status_t, UcxRequest*> UcxConnection::recv_am_iov_data(
 }
 
 void UcxConnection::cancel_request(UcxRequest* request) {
+  UcxRequest *r, *tmp;
+  bool found = false;
+  ucs_list_for_each_safe(r, tmp, &all_requests_, pos) {
+    if (r == request) {
+      found = true;
+      break;
+    }
+  }
+
+  if (!found) {
+    return;
+  }
+
   UCX_CONN_DEBUG << "canceling " << request->what << " request " << request
                  << std::endl;
   ucp_request_cancel(worker_, request);
@@ -462,10 +479,14 @@ void UcxConnection::cancel_send() {
   UcxRequest *request, *tmp;
   unsigned count = 0;
   ucs_list_for_each_safe(request, tmp, &all_requests_, pos) {
-    ++count;
     if (request->type == UcxRequestType::Send) {
+      ++count;
       UCX_CONN_DEBUG << "canceling " << request->what << " request " << request
                      << " #" << count << std::endl;
+      if (request->callback) {
+        (*request->callback)(UCS_ERR_CANCELED);
+        request->callback = nullptr;
+      }
       ucp_request_cancel(worker_, request);
     }
   }
@@ -479,10 +500,14 @@ void UcxConnection::cancel_recv() {
   UcxRequest *request, *tmp;
   unsigned count = 0;
   ucs_list_for_each_safe(request, tmp, &all_requests_, pos) {
-    ++count;
     if (request->type == UcxRequestType::Recv) {
+      ++count;
       UCX_CONN_DEBUG << "canceling " << request->what << " request " << request
                      << " #" << count << std::endl;
+      if (request->callback) {
+        (*request->callback)(UCS_ERR_CANCELED);
+        request->callback = nullptr;
+      }
       ucp_request_cancel(worker_, request);
     }
   }
@@ -499,6 +524,10 @@ void UcxConnection::cancel_all() {
     ++count;
     UCX_CONN_DEBUG << "canceling " << request->what << " request " << request
                    << " #" << count;
+    if (request->callback) {
+      (*request->callback)(UCS_ERR_CANCELED);
+      request->callback = nullptr;
+    }
     ucp_request_cancel(worker_, request);
   }
 }
@@ -531,11 +560,12 @@ void UcxConnection::common_request_callback(
   if (r->callback) {
     // already processed by send/recv function
     (*r->callback)(status);
-    if (r->conn.has_value()) {
-      r->conn.value().get().request_completed(r);
-    }
-    request_release(r);
   }
+
+  if (r->conn.has_value()) {
+    r->conn.value().get().request_completed(r);
+  }
+  request_release(r);
 }
 
 void UcxConnection::am_data_recv_callback(

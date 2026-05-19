@@ -11,6 +11,7 @@ package(default_visibility = ["//visibility:public"])
 
 NANOBIND_COPTS = [
     "-fvisibility=hidden",
+    "-DNB_SHARED=1",
 ]
 
 # Define config settings for C++ standards

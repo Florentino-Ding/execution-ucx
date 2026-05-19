@@ -34,5 +34,6 @@ def axon_pytest_test(name, srcs, deps = [], data = [], **kwargs):
         python_version = "PY3",
         data = common_data + data,
         deps = common_deps + deps,
+        env = kwargs.pop("env", {}) | {"UCX_NET_DEVICES": "lo"},
         **kwargs
     )

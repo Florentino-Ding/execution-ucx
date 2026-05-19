@@ -18,6 +18,9 @@ def axon_tests():
             "@execution-ucx//ucx_context:ucx_memory_resource_lib",
             "@googletest//:gtest_main",
         ],
+        env = {
+            "UCX_NET_DEVICES": "lo",
+        },
     )
 
     cc_test(
@@ -35,6 +38,9 @@ def axon_tests():
             "@execution-ucx//ucx_context:ucx_memory_resource_lib",
             "@googletest//:gtest_main",
         ],
+        env = {
+            "UCX_NET_DEVICES": "lo",
+        },
     )
 
     cc_test(
@@ -124,4 +130,7 @@ def axon_tests():
             "@execution-ucx//ucx_context:ucx_memory_resource_lib",
             "@googletest//:gtest_main",
         ],
+        env = {
+            "UCX_NET_DEVICES": "lo",
+        },
     )

@@ -3,6 +3,7 @@
 This module dynamically loads the C++ extension library built by Bazel.
 """
 
+import os
 import sys
 
 # Import and re-export device module
@@ -20,8 +21,6 @@ from .device import (
     auto_detect,
 )
 
-import os
-
 try:
     # UCX memory hooks (ucm) require RTLD_GLOBAL to intercept munmap/madvise
     # from other libraries like NumPy. Without this, UCX's registration cache
@@ -29,6 +28,7 @@ try:
     old_flags = sys.getdlopenflags()
     sys.setdlopenflags(old_flags | os.RTLD_GLOBAL)
     from ._axon import *  # noqa: F403
+    from ._axon import UcxMemoryResourceManager, DefaultUcxMemoryResourceManager
 
     sys.setdlopenflags(old_flags)
 
