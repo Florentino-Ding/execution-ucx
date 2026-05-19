@@ -2256,6 +2256,38 @@ class ucx_am_context::send_sender_t {
   class operation : private completion_base {
     friend ucx_am_context;
 
+    class DeferredReleaseCallback final : public UcxCallback {
+     public:
+      std::optional<Payload> data_;
+
+      explicit DeferredReleaseCallback(std::optional<Payload>&& data) noexcept
+        : data_(std::move(data)) {}
+
+      ~DeferredReleaseCallback() override = default;
+
+      void operator()([[maybe_unused]] ucs_status_t status) override {
+        delete this;
+      }
+
+      void handle_connection_error(
+        [[maybe_unused]] ucs_status_t status,
+        [[maybe_unused]] UcxConnection& conn) override {
+        delete this;
+      }
+
+      void handle_connection_error(
+        [[maybe_unused]] ucs_status_t status,
+        [[maybe_unused]] std::uint64_t conn_id) override {
+        delete this;
+      }
+
+      void mark_inactive([[maybe_unused]] std::uint64_t conn_id) override {}
+      void mark_disconnecting_from_inactive(
+        [[maybe_unused]] std::uint64_t conn_id) override {}
+      void mark_failed_from_inactive(
+        [[maybe_unused]] std::uint64_t conn_id) override {}
+    };
+
    public:
     template <typename Receiver2>
     explicit operation(const send_sender_t& sender, Receiver2&& r)
@@ -2405,15 +2437,22 @@ class ucx_am_context::send_sender_t {
 
     void request_stop_local() noexcept {
       UNIFEX_ASSERT(context_.is_running_on_io_thread());
-      auto populateSqe = [this]() noexcept {
-        auto cop = reinterpret_cast<std::uintptr_t>(
-          static_cast<completion_base*>(&cop_));
-        // Ensure the connection is valid
+
+      if (__builtin_expect(conn_.has_value(), 1)) {
         auto& conn_ref = conn_.value().get();
         const auto conn_id = conn_ref.id();
         if (context_.conn_manager_.is_connection_valid(conn_id)) {
-          conn_ref.cancel_send();
+          if (this->request_ != nullptr) {
+            auto* deferred_cb =
+              new DeferredReleaseCallback(std::move(data_owned_));
+            this->request_->callback = deferred_cb;
+            conn_ref.cancel_request(this->request_);
+          }
         }
+      }
+      auto populateSqe = [this]() noexcept {
+        auto cop = reinterpret_cast<std::uintptr_t>(
+          static_cast<completion_base*>(&cop_));
         // Update the cqe entry
         auto& entry = this->context_.get_completion_queue_entry();
         entry.user_data = cop;

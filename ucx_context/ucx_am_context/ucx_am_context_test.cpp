@@ -2021,6 +2021,57 @@ TEST_F(
 }
 #endif  // CUDA_ENABLED
 
+// Test Rndv cancellation use-after-free
+TEST_F(UcxAmTest, RndvCancellationSafetyTest) {
+  UcxContextHostRunner server("server_host");
+  UcxContextHostRunner client("client_host");
+
+  unsigned int seed = std::time(nullptr);
+  uint16_t port =
+    static_cast<uint16_t>(1024 + (rand_r(&seed) % (65535 - 1024)));
+  inplace_stop_source stopSource;
+
+  static_thread_pool tpContext{2};
+  auto processScheduler = tpContext.get_scheduler();
+  auto serverScheduler = server.get_context().get_scheduler();
+
+  auto server_task = biDiServerHeaderBufferStart(
+    serverScheduler, processScheduler, port, ucx_memory_type::HOST, stopSource);
+
+  async_scope scope;
+  spawn_detached(unifex::on(processScheduler, std::move(server_task)), scope);
+
+  {
+    auto& clientCtx = client.get_context();
+    auto clientScheduler = clientCtx.get_scheduler();
+    auto clientSocket = create_client_socket(port);
+    auto conn_id = sync_wait(connect_endpoint(
+                               clientScheduler, nullptr,
+                               std::move(clientSocket), sizeof(sockaddr_in)))
+                     .value();
+
+    std::vector<float> payload(10 * 1024 * 1024, 1.0f);
+    ucx_am_data sendData{};
+    sendData.buffer.data = payload.data();
+    sendData.buffer.size = payload.size() * sizeof(float);
+    sendData.buffer_type = ucx_memory_type::HOST;
+    char dummy_header[] = "hello";
+    sendData.header.data = dummy_header;
+    sendData.header.size = sizeof(dummy_header);
+
+    auto send_task = connection_send(clientScheduler, conn_id, sendData)
+                     | stop_when(clientScheduler.schedule_after(
+                       std::chrono::milliseconds(10)));
+
+    // Should return unifex::done due to timeout
+    sync_wait(std::move(send_task));
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+  stopSource.request_stop();
+  sync_wait(scope.join());
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
