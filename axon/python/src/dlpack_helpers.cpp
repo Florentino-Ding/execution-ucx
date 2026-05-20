@@ -269,7 +269,7 @@ std::pair<DLManagedTensor*, nb::object> ExtractDlpackTensor(
 
 ucxx::UcxBuffer DlpackToUcxBuffer(
   nb::object py_dlpack, const rpc::utils::TensorMeta& meta,
-  std::reference_wrapper<ucxx::UcxMemoryResourceManager> mr) {
+  ucxx::UcxMemoryResourceManager& mr) {
   auto [dlm, owner] = ExtractDlpackTensor(py_dlpack);
   if (!dlm) {
     throw std::runtime_error(
@@ -289,7 +289,7 @@ ucxx::UcxBuffer DlpackToUcxBuffer(
 
 ucxx::UcxBuffer DlpackToUcxBuffer(
   nb::object py_dlpack, size_t size, ucx_memory_type_t mem_type,
-  std::reference_wrapper<ucxx::UcxMemoryResourceManager> mr) {
+  ucxx::UcxMemoryResourceManager& mr) {
   auto [dlm, owner] = ExtractDlpackTensor(py_dlpack);
   if (!dlm) {
     throw std::runtime_error(
@@ -307,7 +307,7 @@ ucxx::UcxBuffer DlpackToUcxBuffer(
 
 ucxx::UcxBufferVec DlpackToUcxBufferVec(
   nb::object py_dlpack_list, const rpc::utils::TensorMetaSpan tensor_metas,
-  std::reference_wrapper<ucxx::UcxMemoryResourceManager> mr) {
+  ucxx::UcxMemoryResourceManager& mr) {
   if (!nb::isinstance<nb::list>(py_dlpack_list)) {
     throw std::runtime_error("Expected list of dlpack objects");
   }
@@ -360,8 +360,7 @@ ucxx::UcxBufferVec DlpackToUcxBufferVec(
 
 ucxx::UcxBufferVec DlpackToUcxBufferVec(
   nb::object py_dlpack_list, std::span<const size_t> sizes,
-  ucx_memory_type_t mem_type,
-  std::reference_wrapper<ucxx::UcxMemoryResourceManager> mr) {
+  ucx_memory_type_t mem_type, ucxx::UcxMemoryResourceManager& mr) {
   if (!nb::isinstance<nb::list>(py_dlpack_list)) {
     throw std::runtime_error("Expected list of dlpack objects");
   }
@@ -404,6 +403,7 @@ struct TensorDlpackContext {
 };
 
 nb::object TensorMetaToDlpack(
+  [[maybe_unused]] ucxx::UcxMemoryResourceManager& mr,
   rpc::utils::TensorMeta&& meta, ucxx::UcxBuffer&& buffer) {
   auto owned = std::make_shared<ucxx::UcxBuffer>(std::move(buffer), true);
   DLDevice device = UcxMemoryTypeToDlDevice(owned->type());
@@ -432,6 +432,7 @@ nb::object TensorMetaToDlpack(
 }
 
 nb::list TensorMetaVecToDlpack(
+  [[maybe_unused]] ucxx::UcxMemoryResourceManager& mr,
   cista::offset::vector<rpc::utils::TensorMeta>&& meta_vec,
   ucxx::UcxBufferVec&& buffer_vec) {
   if (meta_vec.size() != buffer_vec.size()) {
@@ -473,7 +474,7 @@ nb::list TensorMetaVecToDlpack(
     auto bufs = std::move(buffer_vec).ExtractBuffers();
     for (size_t i = 0; i < meta_vec.size(); ++i) {
       result.append(
-        TensorMetaToDlpack(std::move(meta_vec[i]), std::move(bufs[i])));
+        TensorMetaToDlpack(mr, std::move(meta_vec[i]), std::move(bufs[i])));
     }
   }
   return result;
@@ -607,8 +608,7 @@ nb::list UcxBufferVecToDLTensor(ucxx::UcxBufferVec&& buffer_vec) {
 }
 
 ucxx::UcxBuffer CreateUcxBufferFromPayload(
-  nb::object payload_obj,
-  std::reference_wrapper<ucxx::UcxMemoryResourceManager> mr) {
+  nb::object payload_obj, ucxx::UcxMemoryResourceManager& mr) {
   // payload_obj should be a dlpack object (UcxBuffer/UcxBufferVec are only
   // exposed through dlpack in Python)
   auto [dlm, owner] = ExtractDlpackTensor(payload_obj);
@@ -635,8 +635,7 @@ ucxx::UcxBuffer CreateUcxBufferFromPayload(
 }
 
 ucxx::UcxBufferVec CreateUcxBufferVecFromPayload(
-  nb::object payload_obj,
-  std::reference_wrapper<ucxx::UcxMemoryResourceManager> mr) {
+  nb::object payload_obj, ucxx::UcxMemoryResourceManager& mr) {
   // payload_obj should be a list of dlpack objects
   if (!nb::isinstance<nb::list>(payload_obj)) {
     throw std::runtime_error(
@@ -725,7 +724,7 @@ rpc::utils::TensorMeta ExtractTensorMetaFromDlm(DLManagedTensor* dlm) {
 
 ucxx::UcxBuffer DlpackToUcxBufferFromDlm(
   DLManagedTensor* dlm, nb::object owner, const rpc::utils::TensorMeta& meta,
-  std::reference_wrapper<ucxx::UcxMemoryResourceManager> mr) {
+  ucxx::UcxMemoryResourceManager& mr) {
   if (!dlm) {
     throw std::runtime_error(
       "DlpackToUcxBufferFromDlm: DLManagedTensor pointer is null");
@@ -745,7 +744,7 @@ ucxx::UcxBuffer DlpackToUcxBufferFromDlm(
 ucxx::UcxBufferVec DlpackToUcxBufferVecFromDlm(
   std::span<DLManagedTensor*> dlms, std::span<nb::object> owners,
   const rpc::utils::TensorMetaSpan tensor_metas,
-  std::reference_wrapper<ucxx::UcxMemoryResourceManager> mr) {
+  ucxx::UcxMemoryResourceManager& mr) {
   if (dlms.size() != owners.size() || dlms.size() != tensor_metas.size()) {
     throw std::runtime_error(
       "DlpackToUcxBufferVecFromDlm: size mismatch between dlms, owners, and "

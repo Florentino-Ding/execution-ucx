@@ -1069,6 +1069,11 @@ class AxonWorker {
             return;
           }
 
+          if (!conn_id.has_value()) {
+            receiver.set_error(conn_id.error());
+            return;
+          }
+
           auto callback =
             [&receiver](
               RpcResponseHandlerExpectedType&& resp_handler_expected) mutable {
@@ -1325,13 +1330,14 @@ auto AxonWorker::InvokeRpc(
   if constexpr (std::is_same_v<PayloadT, ucxx::UcxBuffer>) {
     return InvokeRpcImpl<PayloadT, RespBufferT, MemPolicyT>(
       conn_id, std::move(request_header),
-      std::move(payload).value_or(PayloadT{mr_, ucx_memory_type::HOST, 0}),
+      std::move(payload).value_or(
+        PayloadT{mr_.get(), ucx_memory_type::HOST, 0}),
       std::move(mem_policy));
   } else if constexpr (std::is_same_v<PayloadT, ucxx::UcxBufferVec>) {
     return InvokeRpcImpl<PayloadT, RespBufferT, MemPolicyT>(
       conn_id, std::move(request_header),
       std::move(payload).value_or(
-        PayloadT{mr_, ucx_memory_type::HOST, std::vector<size_t>{0}}),
+        PayloadT{mr_.get(), ucx_memory_type::HOST, std::vector<size_t>{0}}),
       std::move(mem_policy));
   } else {
     return InvokeRpcImpl<std::monostate, RespBufferT, MemPolicyT>(

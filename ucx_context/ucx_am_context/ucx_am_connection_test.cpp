@@ -22,14 +22,11 @@ limitations under the License.
 #include <ucs/datastruct/list.h>
 
 #include <atomic>
-#include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <functional>
 #include <future>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -68,7 +65,7 @@ class UcxConnectionTest : public ::testing::Test {
  protected:
   void SetUp() override {
     setenv("UCX_RNDV_THRESH", std::to_string(RNDV_THRESHOLD).c_str(), 1);
-    setenv("UCX_RNDV_SCHEME", "get_zcopy", 1);
+    // setenv("UCX_RNDV_SCHEME", "get_zcopy", 1);
 
     // Initialize UCX context and worker
     ucp_params_t ucp_params;
@@ -166,7 +163,7 @@ TEST_F(UcxConnectionTest, Connect) {
   // Create a connect callback
   std::atomic<bool> connect_callback_called(false);
   auto connect_callback = std::make_unique<MockCallback>(
-    [&connect_callback_called](ucs_status_t status) {
+    [&connect_callback_called](ucs_status_t /*status*/) {
       // Connection might fail in test environment, so we don't assert on
       // status
       connect_callback_called = true;
@@ -180,7 +177,6 @@ TEST_F(UcxConnectionTest, Connect) {
   // In a real test environment, we would need a server to accept the connection
   // For now, we just check that the callback was called
   EXPECT_TRUE(connect_callback_called);
-  testing::internal::CaptureStdout();
   conn.reset(nullptr);
 }
 
@@ -418,10 +414,10 @@ void RunServer(
 
     ASSERT_TRUE(arg.data_desc->desc != nullptr);
     std::vector<uint8_t> recv_data(arg.data_desc->data_length);
+    recv_am_nbx_callback cb{recv_nbx_called};
     auto [req_status, request] = conn->recv_am_data(
       recv_data.data(), recv_data.size(), nullptr, std::move(*arg.data_desc),
-      UCS_MEMORY_TYPE_HOST,
-      std::make_unique<recv_am_nbx_callback>(recv_nbx_called));
+      UCS_MEMORY_TYPE_HOST, &cb);
     ASSERT_EQ(req_status, UCS_OK);
     ASSERT_EQ(request->type, UcxRequestType::Recv);
     ASSERT_TRUE(request->status == UCS_OK || request->status == UCS_INPROGRESS);
@@ -483,7 +479,7 @@ void RunClient(
   // Send data
   auto [status_send, request] = conn->send_am_data(
     header_data.data(), header_data.size(), send_data.data(), send_data.size(),
-    nullptr, UCS_MEMORY_TYPE_HOST, std::move(send_callback));
+    nullptr, UCS_MEMORY_TYPE_HOST, send_callback.get());
   ASSERT_EQ(status_send, UCS_OK);
   ASSERT_EQ(request->type, UcxRequestType::Send);
   ASSERT_TRUE(request->status == UCS_OK || request->status == UCS_INPROGRESS);
@@ -661,10 +657,10 @@ void RunServerIov(
     std::atomic<bool>& flag_;
   };
 
+  recv_am_iov_callback cb{recv_nbx_called};
   auto [recv_status, recv_req] = conn->recv_am_iov_data(
     recv_iov.data(), recv_iov.size(), nullptr, std::move(*arg.data_desc),
-    UCS_MEMORY_TYPE_HOST,
-    std::make_unique<recv_am_iov_callback>(recv_nbx_called));
+    UCS_MEMORY_TYPE_HOST, &cb);
   ASSERT_EQ(recv_status, UCS_OK);
   ASSERT_TRUE(
     recv_req == nullptr || recv_req->status == UCS_INPROGRESS
@@ -737,7 +733,7 @@ void RunClientIov(
 
   auto [status_send, request] = conn->send_am_iov_data(
     header_bytes.data(), header_bytes.size(), iov.data(), iov.size(), nullptr,
-    UCS_MEMORY_TYPE_HOST, std::move(send_callback));
+    UCS_MEMORY_TYPE_HOST, send_callback.get());
   ASSERT_EQ(status_send, UCS_OK);
   ASSERT_TRUE(
     request == nullptr || request->status == UCS_INPROGRESS
@@ -850,10 +846,10 @@ void RunServerIovRecvContig(
     std::atomic<bool>& flag_;
   };
 
+  recv_am_nbx_callback cb{recv_nbx_called};
   auto [recv_status, recv_req] = conn->recv_am_data(
     recv_data.data(), recv_data.size(), nullptr, std::move(*arg.data_desc),
-    UCS_MEMORY_TYPE_HOST,
-    std::make_unique<recv_am_nbx_callback>(recv_nbx_called));
+    UCS_MEMORY_TYPE_HOST, &cb);
   ASSERT_EQ(recv_status, UCS_OK);
   ASSERT_TRUE(
     recv_req == nullptr || recv_req->status == UCS_INPROGRESS

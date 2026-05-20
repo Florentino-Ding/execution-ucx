@@ -4,7 +4,11 @@
 set -euo pipefail
 
 if [ -n "${BUILD_WORKSPACE_DIRECTORY:-}" ]; then
-	cd ${BUILD_WORKSPACE_DIRECTORY}
+	cd "${BUILD_WORKSPACE_DIRECTORY}"
+else
+	# If run manually, ensure we are at the workspace root
+	SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+	cd "$SCRIPT_DIR/.."
 fi
 echo "Current directory: "$PWD
 
@@ -13,7 +17,7 @@ echo "Searching for files to format in workspace..."
 # Find files and format them.
 # -print0 and xargs -0 handle filenames with spaces or other special characters.
 # Exclude bazel-* directories to avoid formatting generated files.
-find . -type d -name "bazel-*" -prune -o -type f \( \
+find . -type d \( -name "bazel-*" -o -path "./tmp/*" \) -prune -o -type f \( \
 	-name "*.h" \
 	-o -name "*.cpp" \
 	-o -name "*.hpp" \
@@ -28,8 +32,13 @@ find . -type f \( \
 	-o -name "WORKSPACE" \
 	\) -exec buildifier {} \;
 
+# Format Shell scripts using shfmt
+find . -type d \( -name "bazel-*" -o -path "./tmp/*" \) -prune -o -type f \( \
+	-name "*.sh" \
+	\) -print0 | xargs -0 shfmt -w
+
 # Format Python files using Black with Google style (line length 100)
-find . -type d -name "bazel-*" -prune -o -type f \( \
+find . -type d \( -name "bazel-*" -o -path "./tmp/*" \) -prune -o -type f \( \
 	-name "*.py" \
 	\) -print0 | xargs -0 black --target-version=py311
 

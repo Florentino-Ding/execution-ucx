@@ -29,6 +29,8 @@ limitations under the License.
 namespace eux {
 namespace ucxx {
 
+class UcxMemoryResourceManager;
+
 /**
  * @brief Base class for managing different types of memory resources in UCX
  * context

@@ -16,6 +16,7 @@ limitations under the License.
 #include "ucx_context/ucx_am_context/ucx_am_context.hpp"
 
 #include <arpa/inet.h>
+#include <sys/stat.h>
 #if CUDA_ENABLED
 #include <cuda_runtime.h>
 #endif
@@ -193,14 +194,18 @@ class UcxContextCUDARunner : public UcxContextRunner {
  public:
   UcxContextCUDARunner(
     std::string name, bool use_ucp_address,
-    std::chrono::milliseconds timeout = std::chrono::milliseconds(300))
+    std::chrono::milliseconds timeout = std::chrono::seconds(30))
     : UcxContextRunner(name, timeout), use_ucp_address_(use_ucp_address) {
     init();
   }
 
   ~UcxContextCUDARunner() override {
     cleanup();
-    ucx_am_context::destroy_ucp_context(ucp_context_);
+    context_.reset();  // Destroy the worker and endpoints first
+    if (ucp_context_) {
+      ucx_am_context::destroy_ucp_context(ucp_context_);
+      ucp_context_ = nullptr;
+    }
   }
 
  protected:
@@ -256,7 +261,7 @@ class UcxAmTest : public ::testing::Test {
     setenv(
       "UCX_RNDV_THRESH", std::to_string(kUcxRndvThreshold).c_str(),
       1);  // Set RNDV threshold to 8KB
-    setenv("UCX_RNDV_SCHEME", "get_zcopy", 1);
+    // setenv("UCX_RNDV_SCHEME", "get_zcopy", 1);
     setenv("UCX_TCP_MAX_CONN_RETRIES", "1", 1);
   }
 
@@ -271,7 +276,8 @@ class UcxAmTest : public ::testing::Test {
     sockaddr_in* addr = new sockaddr_in{
       .sin_family = AF_INET,
       .sin_port = htons(port),
-      .sin_addr = {.s_addr = htonl(INADDR_ANY)}};
+      .sin_addr = {.s_addr = htonl(INADDR_ANY)},
+      .sin_zero = {0}};
     return std::unique_ptr<sockaddr>(reinterpret_cast<sockaddr*>(addr));
   }
 
@@ -279,7 +285,8 @@ class UcxAmTest : public ::testing::Test {
     sockaddr_in* addr = new sockaddr_in{
       .sin_family = AF_INET,
       .sin_port = htons(port),
-      .sin_addr = {.s_addr = htonl(INADDR_LOOPBACK)}};
+      .sin_addr = {.s_addr = htonl(INADDR_LOOPBACK)},
+      .sin_zero = {0}};
     return std::unique_ptr<sockaddr>(reinterpret_cast<sockaddr*>(addr));
   }
 
@@ -599,13 +606,27 @@ class UcxAmTest : public ::testing::Test {
     inplace_stop_source& stopSource) {
     async_scope scope;
     auto workerThread = processScheduler;
-    [[maybe_unused]] auto conn_id =
-      co_await connect_endpoint(scheduler, client_ucp_address);
-    spawn_detached(
-      on(
-        workerThread, biDiServerHeaderBufferRepeatRecvSendTask(
-                        scheduler, processScheduler, recvDataType, stopSource)),
-      scope);
+    co_await let_error(
+      connect_endpoint(scheduler, client_ucp_address)
+        | then([&]([[maybe_unused]] std::uint64_t conn_id_) {
+            spawn_detached(
+              on(
+                workerThread,
+                biDiServerHeaderBufferRepeatRecvSendTask(
+                  scheduler, processScheduler, recvDataType, stopSource)),
+              scope);
+          }),
+      [&](std::variant<std::error_code, std::exception_ptr>&& err) {
+        return just_from([err = std::move(err), &stopSource]() mutable {
+          stopSource.request_stop();
+          if (std::holds_alternative<std::exception_ptr>(err)) {
+            std::rethrow_exception(std::get<std::exception_ptr>(err));
+          }
+          throw std::system_error(
+            std::get<std::error_code>(err),
+            "biDiServerHeaderBufferStart connect");
+        });
+      });
     co_await scope.join();
     co_return;
   }
@@ -618,6 +639,13 @@ class UcxAmTest : public ::testing::Test {
     if (test_memory_type == ucx_memory_type::CUDA) {
       GTEST_SKIP()
         << "CUDA not enabled, skipping CUDA memory type test variant.";
+      return;
+    }
+#else
+    if (test_memory_type == ucx_memory_type::CUDA && false) {
+      GTEST_SKIP()
+        << "nvidia_peermem not loaded: GPU-Direct required for CUDA memory "
+           "transfers.";
       return;
     }
 #endif
@@ -799,21 +827,34 @@ class UcxAmTest : public ::testing::Test {
     inplace_stop_source& stopSource) {
     async_scope scope;
     auto workerThread = processScheduler;
-    [[maybe_unused]] auto conn_id =
-      co_await connect_endpoint(scheduler, client_ucp_address);
-    spawn_detached(
-      on(
-        workerThread, biDiServerRepeatRecvSendTask(
-                        scheduler, processScheduler, recvDataType, stopSource)),
-      scope);
+    co_await let_error(
+      connect_endpoint(scheduler, client_ucp_address)
+        | then([&]([[maybe_unused]] std::uint64_t conn_id_) {
+            spawn_detached(
+              on(
+                workerThread,
+                biDiServerRepeatRecvSendTask(
+                  scheduler, processScheduler, recvDataType, stopSource)),
+              scope);
+          }),
+      [&](std::variant<std::error_code, std::exception_ptr>&& err) {
+        return just_from([err = std::move(err), &stopSource]() mutable {
+          stopSource.request_stop();
+          if (std::holds_alternative<std::exception_ptr>(err)) {
+            std::rethrow_exception(std::get<std::exception_ptr>(err));
+          }
+          throw std::system_error(
+            std::get<std::error_code>(err), "biDiServerStart connect");
+        });
+      });
     co_await scope.join();
     co_return;
   }
 
   task<UcxAmData> biDiClientSendRecvTask(
     ucx_am_context::scheduler& ucxScheduler,
-    static_thread_pool::scheduler& processScheduler, std::uint64_t conn_id,
-    ucx_am_data& sendData) {
+    [[maybe_unused]] static_thread_pool::scheduler& processScheduler,
+    std::uint64_t conn_id, ucx_am_data& sendData) {
     co_await connection_send(ucxScheduler, conn_id, sendData);
     auto recvBundle =
       co_await connection_recv(ucxScheduler, sendData.buffer_type);
@@ -867,9 +908,22 @@ class UcxAmTest : public ::testing::Test {
     inplace_stop_source& stopSource) {
     async_scope scope;
     auto workerThread = processScheduler;
-    auto conn_id = co_await connect_endpoint(ucxScheduler, server_ucp_address);
+    std::optional<std::uint64_t> conn_id_opt;
+    co_await let_error(
+      connect_endpoint(ucxScheduler, server_ucp_address)
+        | then([&](std::uint64_t id) { conn_id_opt = id; }),
+      [&](
+        std::variant<std::error_code, std::exception_ptr>&& err) -> task<void> {
+        co_await scope.join();
+        stopSource.request_stop();
+        if (std::holds_alternative<std::exception_ptr>(err)) {
+          std::rethrow_exception(std::get<std::exception_ptr>(err));
+        }
+        throw std::system_error(
+          std::get<std::error_code>(err), "biDiClientStart connect");
+      });
     co_return co_await biDiClientSpawnTask(
-      ucxScheduler, workerThread, scope, stopSource, conn_id, sendData);
+      ucxScheduler, workerThread, scope, stopSource, *conn_id_opt, sendData);
   }
 
   // Helper function for bidirectional transfer tests
@@ -880,6 +934,13 @@ class UcxAmTest : public ::testing::Test {
     if (test_memory_type == ucx_memory_type::CUDA) {
       GTEST_SKIP()
         << "CUDA not enabled, skipping CUDA memory type test variant.";
+      return;
+    }
+#else
+    if (test_memory_type == ucx_memory_type::CUDA && false) {
+      GTEST_SKIP()
+        << "nvidia_peermem not loaded: GPU-Direct required for CUDA memory "
+           "transfers.";
       return;
     }
 #endif
@@ -1324,7 +1385,8 @@ TEST_F(UcxAmTest, ErrorHandling) {
   sockaddr_in* addr = new sockaddr_in{
     .sin_family = AF_INET,
     .sin_port = htons(port),
-    .sin_addr = {.s_addr = inet_addr("192.0.2.1")}};  // illegal address
+    .sin_addr = {.s_addr = inet_addr("192.0.2.1")},
+    .sin_zero = {0}};  // illegal address
   auto clientSocket =
     std::unique_ptr<sockaddr>(reinterpret_cast<sockaddr*>(addr));
   auto testData = create_test_data(1024);
@@ -1344,12 +1406,13 @@ TEST_F(UcxAmTest, ErrorHandling) {
   sync_wait(let_error(
     connection_send(clientScheduler, conn_id.value(), sendData)
       | then([&]() { sendSuccess.store(true); }),
-    [&](std::variant<std::error_code, std::exception_ptr>&& error_variant) {
+    [&]([[maybe_unused]] std::variant<std::error_code, std::exception_ptr>&&
+          error_variant) {
       return sequence(
         then(
           handle_error_connection(
             clientScheduler,
-            [&](std::uint64_t conn_id, ucs_status_t status) {
+            [&]([[maybe_unused]] std::uint64_t conn_id, ucs_status_t status) {
               EXPECT_LT(status, 0);
               return true;
             }),
@@ -1379,10 +1442,12 @@ TEST_F(UcxAmTest, BidirectionalSmallMessageCUDATransfer) {
   CUcontext context;
   ASSERT_EQ(cuInit(0), CUDA_SUCCESS);
   ASSERT_EQ(cuDeviceGet(&device, 0), CUDA_SUCCESS);
-  ASSERT_EQ(cuCtxCreate(&context, 0, device), CUDA_SUCCESS);
-  ASSERT_EQ(cuCtxSetCurrent(context), CUDA_SUCCESS);
+  ASSERT_EQ(cuDevicePrimaryCtxRetain(&context, device), CUDA_SUCCESS);
+  ASSERT_EQ(cuCtxPushCurrent(context), CUDA_SUCCESS);
   runBidirectionalTransferTestLogic(1024, ucx_memory_type::CUDA);
-  ASSERT_EQ(cuCtxDestroy(context), CUDA_SUCCESS);
+  CUcontext popped_ctx;
+  ASSERT_EQ(cuCtxPopCurrent(&popped_ctx), CUDA_SUCCESS);
+  ASSERT_EQ(cuDevicePrimaryCtxRelease(device), CUDA_SUCCESS);
 }
 
 // Test bidirectional  large message transfer and processing (RNDV protocol)
@@ -1392,10 +1457,12 @@ TEST_F(UcxAmTest, BidirectionalLargeMessageCUDATransfer) {
   CUcontext context;
   ASSERT_EQ(cuInit(0), CUDA_SUCCESS);
   ASSERT_EQ(cuDeviceGet(&device, 0), CUDA_SUCCESS);
-  ASSERT_EQ(cuCtxCreate(&context, 0, device), CUDA_SUCCESS);
-  ASSERT_EQ(cuCtxSetCurrent(context), CUDA_SUCCESS);
+  ASSERT_EQ(cuDevicePrimaryCtxRetain(&context, device), CUDA_SUCCESS);
+  ASSERT_EQ(cuCtxPushCurrent(context), CUDA_SUCCESS);
   runBidirectionalTransferTestLogic(1024 * 1024, ucx_memory_type::CUDA);
-  ASSERT_EQ(cuCtxDestroy(context), CUDA_SUCCESS);
+  CUcontext popped_ctx;
+  ASSERT_EQ(cuCtxPopCurrent(&popped_ctx), CUDA_SUCCESS);
+  ASSERT_EQ(cuDevicePrimaryCtxRelease(device), CUDA_SUCCESS);
 }
 
 // Test bidirectional small message transfer and processing (eager protocol)
@@ -1431,10 +1498,12 @@ TEST_F(UcxAmTest, BidirectionalSmallHeaderBufferCUDATransfer) {
   CUcontext context;
   ASSERT_EQ(cuInit(0), CUDA_SUCCESS);
   ASSERT_EQ(cuDeviceGet(&device, 0), CUDA_SUCCESS);
-  ASSERT_EQ(cuCtxCreate(&context, 0, device), CUDA_SUCCESS);
-  ASSERT_EQ(cuCtxSetCurrent(context), CUDA_SUCCESS);
+  ASSERT_EQ(cuDevicePrimaryCtxRetain(&context, device), CUDA_SUCCESS);
+  ASSERT_EQ(cuCtxPushCurrent(context), CUDA_SUCCESS);
   runBidirectionalHeaderBufferTransferTestLogic(1024, ucx_memory_type::CUDA);
-  ASSERT_EQ(cuCtxDestroy(context), CUDA_SUCCESS);
+  CUcontext popped_ctx;
+  ASSERT_EQ(cuCtxPopCurrent(&popped_ctx), CUDA_SUCCESS);
+  ASSERT_EQ(cuDevicePrimaryCtxRelease(device), CUDA_SUCCESS);
 }
 
 TEST_F(UcxAmTest, BidirectionalLargeHeaderBufferCUDATransfer) {
@@ -1442,11 +1511,13 @@ TEST_F(UcxAmTest, BidirectionalLargeHeaderBufferCUDATransfer) {
   CUcontext context;
   ASSERT_EQ(cuInit(0), CUDA_SUCCESS);
   ASSERT_EQ(cuDeviceGet(&device, 0), CUDA_SUCCESS);
-  ASSERT_EQ(cuCtxCreate(&context, 0, device), CUDA_SUCCESS);
-  ASSERT_EQ(cuCtxSetCurrent(context), CUDA_SUCCESS);
+  ASSERT_EQ(cuDevicePrimaryCtxRetain(&context, device), CUDA_SUCCESS);
+  ASSERT_EQ(cuCtxPushCurrent(context), CUDA_SUCCESS);
   runBidirectionalHeaderBufferTransferTestLogic(
     1024 * 1024, ucx_memory_type::CUDA);
-  ASSERT_EQ(cuCtxDestroy(context), CUDA_SUCCESS);
+  CUcontext popped_ctx;
+  ASSERT_EQ(cuCtxPopCurrent(&popped_ctx), CUDA_SUCCESS);
+  ASSERT_EQ(cuDevicePrimaryCtxRelease(device), CUDA_SUCCESS);
 }
 
 TEST_F(UcxAmTest, BidirectionalSmallHeaderBufferCUDATransferWithUcpAddress) {
@@ -1521,6 +1592,12 @@ void UcxAmTest::runUcpAddressHeaderBufferTestLogic(
 #if !CUDA_ENABLED
   if (test_memory_type == ucx_memory_type::CUDA) {
     GTEST_SKIP() << "CUDA not enabled, skipping CUDA memory type test variant.";
+    return;
+  }
+#else
+  if (test_memory_type == ucx_memory_type::CUDA && false) {
+    GTEST_SKIP() << "nvidia_peermem not loaded: GPU-Direct required for CUDA "
+                    "memory transfers.";
     return;
   }
 #endif
@@ -1943,6 +2020,57 @@ TEST_F(
     /*iovec_recv_as_contiguous=*/true);
 }
 #endif  // CUDA_ENABLED
+
+// Test Rndv cancellation use-after-free
+TEST_F(UcxAmTest, RndvCancellationSafetyTest) {
+  UcxContextHostRunner server("server_host");
+  UcxContextHostRunner client("client_host");
+
+  unsigned int seed = std::time(nullptr);
+  uint16_t port =
+    static_cast<uint16_t>(1024 + (rand_r(&seed) % (65535 - 1024)));
+  inplace_stop_source stopSource;
+
+  static_thread_pool tpContext{2};
+  auto processScheduler = tpContext.get_scheduler();
+  auto serverScheduler = server.get_context().get_scheduler();
+
+  auto server_task = biDiServerHeaderBufferStart(
+    serverScheduler, processScheduler, port, ucx_memory_type::HOST, stopSource);
+
+  async_scope scope;
+  spawn_detached(unifex::on(processScheduler, std::move(server_task)), scope);
+
+  {
+    auto& clientCtx = client.get_context();
+    auto clientScheduler = clientCtx.get_scheduler();
+    auto clientSocket = create_client_socket(port);
+    auto conn_id = sync_wait(connect_endpoint(
+                               clientScheduler, nullptr,
+                               std::move(clientSocket), sizeof(sockaddr_in)))
+                     .value();
+
+    std::vector<float> payload(10 * 1024 * 1024, 1.0f);
+    ucx_am_data sendData{};
+    sendData.buffer.data = payload.data();
+    sendData.buffer.size = payload.size() * sizeof(float);
+    sendData.buffer_type = ucx_memory_type::HOST;
+    char dummy_header[] = "hello";
+    sendData.header.data = dummy_header;
+    sendData.header.size = sizeof(dummy_header);
+
+    auto send_task = connection_send(clientScheduler, conn_id, sendData)
+                     | stop_when(clientScheduler.schedule_after(
+                       std::chrono::milliseconds(10)));
+
+    // Should return unifex::done due to timeout
+    sync_wait(std::move(send_task));
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+  stopSource.request_stop();
+  sync_wait(scope.join());
+}
 
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);

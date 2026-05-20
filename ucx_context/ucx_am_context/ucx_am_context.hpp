@@ -746,11 +746,20 @@ class ucx_am_context {
       op.stopCallbackConstructed_ = true;
     }
 
-    if (__builtin_expect(stop_token.stop_requested(), 0)) {
-      unifex::set_done(std::move(op.receiver_));
-      return false;
+    if constexpr (requires { op.cancel_flag_; }) {
+      // For operations supporting our symmetric ref-counted cancel machine,
+      // stopCallback_.construct() above will have synchronously triggered
+      // request_stop() if stop_requested() is true, safely scheduling cancel on
+      // the IO thread. We must NOT synchronously set_done here to avoid UAF and
+      // crashes.
+      return true;
+    } else {
+      if (__builtin_expect(stop_token.stop_requested(), 0)) {
+        unifex::set_done(std::move(op.receiver_));
+        return false;
+      }
+      return true;
     }
-    return true;
   }
 
   bool is_running_on_io_thread() const noexcept;
@@ -907,9 +916,6 @@ class ucx_am_context {
   // operation into pendingAcptIoQueue_
   std::deque<operation_base*> pendingAcptIoQueue_;
 
-  // UCX connection struct
-  ConnectionManager conn_manager_;
-
   ////////
   // Data that does not change once initialised.
 
@@ -965,6 +971,10 @@ class ucx_am_context {
 
   // Queue of operations enqueued by remote threads.
   atomic_intrusive_queue<operation_base, &operation_base::next_> remoteQueue_;
+
+  // UCX connection struct (Declared at the end so it is destroyed BEFORE queues
+  // to prevent use-after-free)
+  ConnectionManager conn_manager_;
 };
 
 template <typename StopToken>
@@ -1215,7 +1225,7 @@ class ucx_am_context::recv_sender {
               data_.buffer.data =
                 mr_.get().allocate(data_.buffer_type, amDesc.data_length);
             }
-            auto am_recv_cb = std::make_unique<CqeEntryCallback>(
+            cqe_cb_.emplace(
               op_, &(this->context_), [](void* context_ptr) -> ucx_am_cqe& {
                 return reinterpret_cast<ucx_am_context*>(context_ptr)
                   ->get_completion_queue_entry();
@@ -1224,7 +1234,7 @@ class ucx_am_context::recv_sender {
             std::tie(this->result_, request_) = conn.get().recv_am_data(
               data_.buffer.data, amDesc.data_length, impl_memh_,
               std::move(amDesc), mem_type_map(data_.buffer_type),
-              std::move(am_recv_cb));
+              &cqe_cb_.value());
           } else {
             // Handle eager protocol
             if (amDesc.recv_attr & UCP_AM_RECV_ATTR_FLAG_DATA) {
@@ -1375,10 +1385,11 @@ class ucx_am_context::recv_sender {
 
       // If data is owned, move it; otherwise, copy from the external buffer.
       UcxAmData am_data_wrapper =
-        self.data_own_.has_value() ? std::move(self.data_own_.value())
-                                   : UcxAmData(
-                                     self.mr_, self.data_, /*own_header=*/false,
-                                     /*own_buffer=*/false);
+        self.data_own_.has_value()
+          ? std::move(self.data_own_.value())
+          : UcxAmData(
+            self.mr_.get(), self.data_, /*own_header=*/false,
+            /*own_buffer=*/false);
 
       if (get_stop_token(self.receiver_).stop_requested()) {
         unifex::set_done(std::move(self.receiver_));
@@ -1398,18 +1409,8 @@ class ucx_am_context::recv_sender {
           }
         }
       } else if (self.result_ == UCS_ERR_CANCELED) {
-        UNIFEX_TRY { am_data_wrapper.~UcxAmData(); }
-        UNIFEX_CATCH(...) {
-          UCX_CTX_ERROR
-            << "Failed to deallocate data in recv_sender on_read_complete";
-        }
         unifex::set_done(std::move(self.receiver_));
       } else {
-        UNIFEX_TRY { am_data_wrapper.~UcxAmData(); }
-        UNIFEX_CATCH(...) {
-          UCX_CTX_ERROR
-            << "Failed to deallocate data in recv_sender on_read_complete";
-        }
         unifex::set_error(
           std::move(self.receiver_),
           eux::ucxx::make_error_code(static_cast<ucs_status_t>(self.result_)));
@@ -1455,6 +1456,7 @@ class ucx_am_context::recv_sender {
       stopCallback_;
     bool stopCallbackConstructed_ = false;
     std::atomic_char refCount_{1};
+    std::optional<CqeEntryCallback> cqe_cb_;
     cancel_operation cop_{*this};
   };
 
@@ -1486,7 +1488,7 @@ class ucx_am_context::recv_sender {
     ucx_am_context& context, ucx_memory_type data_type) noexcept
     : context_(context),
       data_own_(
-        std::in_place, context.mr_, 0, 0, data_type,
+        std::in_place, context.mr_.get(), 0, 0, data_type,
         /*own_header=*/true,
         /*own_buffer=*/true),
       data_(*data_own_.value().get()),
@@ -1552,6 +1554,16 @@ class ucx_am_context::recv_buffer_sender_t {
         // Handle cancellation
         if (cancel_flag_.load(std::memory_order_consume)) {
           this->result_ = UCS_ERR_CANCELED;
+          auto amDescOpt = context_.amDescMap_.pop(this->am_desc_key_);
+          if (amDescOpt.has_value()) {
+            context_.release_rndv_am_desc(std::move(amDescOpt.value()), mr_);
+          }
+          auto op_ = reinterpret_cast<std::uintptr_t>(
+            static_cast<completion_base*>(this));
+          auto& entry = this->context_.get_completion_queue_entry();
+          entry.user_data = op_;
+          entry.res = UCS_ERR_CANCELED;
+          this->execute_ = &operation::on_read_complete;
           return true;
         }
         // Get operation pointer for completion
@@ -1591,7 +1603,7 @@ class ucx_am_context::recv_buffer_sender_t {
           this->execute_ = &operation::on_read_complete;
 
           if (UcxConnection::ucx_am_is_rndv(amDesc)) {
-            auto am_recv_cb = std::make_unique<CqeEntryCallback>(
+            cqe_cb_.emplace(
               op_, &(this->context_), [](void* context_ptr) -> ucx_am_cqe& {
                 return reinterpret_cast<ucx_am_context*>(context_ptr)
                   ->get_completion_queue_entry();
@@ -1624,7 +1636,7 @@ class ucx_am_context::recv_buffer_sender_t {
                 reinterpret_cast<ucp_mem_h>(buffer_own_.mem_h());
               std::tie(this->result_, request_) = conn.get().recv_am_data(
                 buffer->data, amDesc.data_length, impl_memh_, std::move(amDesc),
-                mem_type_map(buffer_own_.type()), std::move(am_recv_cb));
+                mem_type_map(buffer_own_.type()), &cqe_cb_.value());
             } else if constexpr (is_vec) {
               auto& buffer_vec = buffer_own_;
               auto impl_memh_ = reinterpret_cast<ucp_mem_h>(buffer_vec.mem_h());
@@ -1633,7 +1645,7 @@ class ucx_am_context::recv_buffer_sender_t {
               std::tie(this->result_, request_) = conn.get().recv_am_iov_data(
                 buffer_vec_data, buffer_vec.size(), impl_memh_,
                 std::move(amDesc), mem_type_map(buffer_vec.type()),
-                std::move(am_recv_cb));
+                &cqe_cb_.value());
             } else {
               UNIFEX_ASSERT(false && "recv_buffer_sender not implemented");
               UCX_CTX_ERROR << "recv_buffer_sender not implemented"
@@ -1680,23 +1692,31 @@ class ucx_am_context::recv_buffer_sender_t {
 
     void request_stop_local() noexcept {
       UNIFEX_ASSERT(context_.is_running_on_io_thread());
+
+      if (__builtin_expect(conn_.has_value(), 1)) {
+        auto& conn_ref = conn_.value().get();
+        const auto conn_id = conn_ref.id();
+        if (context_.conn_manager_.is_connection_valid(conn_id)) {
+          if (this->request_ != nullptr) {
+            conn_ref.cancel_request(this->request_);
+          }
+        }
+      }
+
       auto populateSqe = [this]() noexcept {
         auto cop = reinterpret_cast<std::uintptr_t>(
           static_cast<completion_base*>(&cop_));
-        if (__builtin_expect(conn_.has_value(), 1)) {
-          auto& conn_ref = conn_.value().get();
-          if (request_) {
-            conn_ref.cancel_request(request_);
-          }
-        }
         auto& entry = this->context_.get_completion_queue_entry();
         entry.user_data = cop;
         entry.res = UCS_ERR_CANCELED;
         this->result_ = UCS_ERR_CANCELED;
         cop_.execute_ = &cancel_operation::on_stop_complete;
 
-        // Ensure the operation is removed from the map
-        context_.amDescMap_.pop(this->am_desc_key_);
+        // Ensure the operation is removed from the map and properly released
+        auto amDescOpt = context_.amDescMap_.pop(this->am_desc_key_);
+        if (amDescOpt.has_value()) {
+          context_.release_rndv_am_desc(std::move(amDescOpt.value()), mr_);
+        }
       };
 
       if (!context_.try_submit_io(populateSqe)) {
@@ -1754,6 +1774,10 @@ class ucx_am_context::recv_buffer_sender_t {
       static void on_stop_complete(operation_base* op) noexcept {
         auto& self =
           *static_cast<operation*>(&(static_cast<cancel_operation*>(op)->op_));
+        if (self.refCount_.fetch_sub(1, std::memory_order_acq_rel) != 1) {
+          // Waiting for on_read_complete to complete
+          return;
+        }
         self.stopCallback_.destruct();
         unifex::set_done(std::move(self.receiver_));
       }
@@ -1782,6 +1806,7 @@ class ucx_am_context::recv_buffer_sender_t {
       stopCallback_;
     bool stopCallbackConstructed_ = false;
     std::atomic_char refCount_{1};
+    std::optional<CqeEntryCallback> cqe_cb_;
     cancel_operation cop_{*this};
   };
 
@@ -1824,7 +1849,7 @@ class ucx_am_context::recv_buffer_sender_t {
     std::enable_if_t<std::is_same_v<B, UcxBuffer>>* = nullptr) noexcept
     : am_desc_key_(key),
       context_(context),
-      buffer_own_({context.mr_, memory_type, 0}),
+      buffer_own_({context.mr_.get(), memory_type, 0}),
       mr_(context.mr_) {}
 
   template <typename Receiver>
@@ -1949,7 +1974,7 @@ class ucx_am_context::recv_header_sender {
           this->conn_ = conn;
 
           header_own_.emplace(UcxHeader(
-            context_.mr_, amDesc.header, amDesc.header_length,
+            context_.mr_.get(), amDesc.header, amDesc.header_length,
             /*own_header=*/true));
 
           // Only use RNDV path if recv_attr has RNDV flag AND data_length > 0
@@ -1969,7 +1994,7 @@ class ucx_am_context::recv_header_sender {
               if (amDesc.recv_attr & UCP_AM_RECV_ATTR_FLAG_DATA) {
                 ucp_worker_h ucp_worker = this->ucpWorker_;
                 buffer_own_.emplace(UcxBuffer(
-                  context_.mr_, ucx_memory_type::HOST, std::move(buffer),
+                  context_.mr_.get(), ucx_memory_type::HOST, std::move(buffer),
                   nullptr,
                   /*own_buffer=*/true, [ucp_worker](void* data) {
                     if (data == nullptr) {
@@ -1988,13 +2013,13 @@ class ucx_am_context::recv_header_sender {
                 // Has been handled in the message callback
                 // Eager message is always in host memory
                 buffer_own_.emplace(UcxBuffer(
-                  context_.mr_, ucx_memory_type::HOST, std::move(buffer),
+                  context_.mr_.get(), ucx_memory_type::HOST, std::move(buffer),
                   nullptr,
                   /*own_buffer=*/true));
               }
             } else {
               buffer_own_.emplace(UcxBuffer(
-                context_.mr_, ucx_memory_type::HOST, 0, nullptr,
+                context_.mr_.get(), ucx_memory_type::HOST, 0, nullptr,
                 /*own_buffer=*/true));
             }
           }
@@ -2132,9 +2157,9 @@ class ucx_am_context::recv_header_sender {
       } else if (self.result_ == UCS_ERR_CANCELED) {
         UNIFEX_TRY {
           if (self.header_own_.has_value()) {
-            self.header_own_.value().~UcxHeader();
+            self.header_own_.reset();
           } else if (self.buffer_own_.has_value()) {
-            self.buffer_own_.value().~UcxBuffer();
+            self.buffer_own_.reset();
           }
         }
         UNIFEX_CATCH(...) {
@@ -2145,9 +2170,9 @@ class ucx_am_context::recv_header_sender {
       } else {
         UNIFEX_TRY {
           if (self.header_own_.has_value()) {
-            self.header_own_.value().~UcxHeader();
+            self.header_own_.reset();
           } else if (self.buffer_own_.has_value()) {
-            self.buffer_own_.value().~UcxBuffer();
+            self.buffer_own_.reset();
           }
         }
         UNIFEX_CATCH(...) {
@@ -2262,6 +2287,38 @@ class ucx_am_context::send_sender_t {
   class operation : private completion_base {
     friend ucx_am_context;
 
+    class DeferredReleaseCallback final : public UcxCallback {
+     public:
+      std::optional<Payload> data_;
+
+      explicit DeferredReleaseCallback(std::optional<Payload>&& data) noexcept
+        : data_(std::move(data)) {}
+
+      ~DeferredReleaseCallback() override = default;
+
+      void operator()([[maybe_unused]] ucs_status_t status) override {
+        delete this;
+      }
+
+      void handle_connection_error(
+        [[maybe_unused]] ucs_status_t status,
+        [[maybe_unused]] UcxConnection& conn) override {
+        delete this;
+      }
+
+      void handle_connection_error(
+        [[maybe_unused]] ucs_status_t status,
+        [[maybe_unused]] std::uint64_t conn_id) override {
+        delete this;
+      }
+
+      void mark_inactive([[maybe_unused]] std::uint64_t conn_id) override {}
+      void mark_disconnecting_from_inactive(
+        [[maybe_unused]] std::uint64_t conn_id) override {}
+      void mark_failed_from_inactive(
+        [[maybe_unused]] std::uint64_t conn_id) override {}
+    };
+
    public:
     template <typename Receiver2>
     explicit operation(const send_sender_t& sender, Receiver2&& r)
@@ -2334,28 +2391,29 @@ class ucx_am_context::send_sender_t {
           return true;
         }
         auto& conn_ref = conn_.value().get();
-        std::unique_ptr<UcxCallback> am_send_cb;
+        UcxCallback* am_send_cb = nullptr;
         bool use_rndv = true;
         if constexpr (std::is_same_v<payload_view_t, ucx_am_data>) {
           use_rndv = conn_ref.should_use_zcopy(data_.buffer.size);
         }
         if (use_rndv) {
-          am_send_cb = std::move(std::make_unique<CqeEntryCallback>(
+          cqe_cb_.emplace(
             op_, reinterpret_cast<void*>(&(this->context_)),
             [](void* context_ptr) -> ucx_am_cqe& {
               return reinterpret_cast<ucx_am_context*>(context_ptr)
                 ->get_completion_queue_entry();
-            }));
+            });
+          am_send_cb = &cqe_cb_.value();
         } else {
           // TODO(He Jia): pendingIOQueue_ is faster than CQE
-          am_send_cb = std::move(std::make_unique<DirectEntryCallback>(
-            this, [](ucs_status_t status, void* op) {
-              auto this_ = reinterpret_cast<operation*>(op);
-              this_->result_ = status;
-              // Schedule the completion to the pending IO queue front
-              --this_->context_.sqUnflushedCount_;
-              this_->context_.reschedule_pending_io(this_);
-            }));
+          direct_cb_.emplace(this, [](ucs_status_t status, void* op) {
+            auto this_ = reinterpret_cast<operation*>(op);
+            this_->result_ = status;
+            // Schedule the completion to the pending IO queue front
+            --this_->context_.sqUnflushedCount_;
+            this_->context_.reschedule_pending_io(this_);
+          });
+          am_send_cb = &direct_cb_.value();
         }
         // Prepare buffer
         auto impl_memh_ = reinterpret_cast<ucp_mem_h>(data_.mem_h);
@@ -2364,14 +2422,14 @@ class ucx_am_context::send_sender_t {
           std::tie(this->result_, this->request_) = conn_ref.send_am_data(
             data_.header.data, data_.header.size, data_.buffer.data,
             data_.buffer.size, impl_memh_, mem_type_map(data_.buffer_type),
-            std::move(am_send_cb));
+            am_send_cb);
         } else if constexpr (std::is_same_v<payload_view_t, ucx_am_iovec>) {
           static_assert(sizeof(ucp_dt_iov_t) == sizeof(data_.buffer_vec[0]));
           std::tie(this->result_, this->request_) = conn_ref.send_am_iov_data(
             data_.header.data, data_.header.size,
             reinterpret_cast<ucp_dt_iov_t*>(data_.buffer_vec),
             data_.buffer_count, impl_memh_, mem_type_map(data_.buffer_type),
-            std::move(am_send_cb));
+            am_send_cb);
         } else {
           static_assert(
             payload_always_false::value,
@@ -2410,15 +2468,22 @@ class ucx_am_context::send_sender_t {
 
     void request_stop_local() noexcept {
       UNIFEX_ASSERT(context_.is_running_on_io_thread());
-      auto populateSqe = [this]() noexcept {
-        auto cop = reinterpret_cast<std::uintptr_t>(
-          static_cast<completion_base*>(&cop_));
-        // Ensure the connection is valid
+
+      if (__builtin_expect(conn_.has_value(), 1)) {
         auto& conn_ref = conn_.value().get();
         const auto conn_id = conn_ref.id();
         if (context_.conn_manager_.is_connection_valid(conn_id)) {
-          conn_ref.cancel_send();
+          if (this->request_ != nullptr) {
+            auto* deferred_cb =
+              new DeferredReleaseCallback(std::move(data_owned_));
+            this->request_->callback = deferred_cb;
+            conn_ref.cancel_request(this->request_);
+          }
         }
+      }
+      auto populateSqe = [this]() noexcept {
+        auto cop = reinterpret_cast<std::uintptr_t>(
+          static_cast<completion_base*>(&cop_));
         // Update the cqe entry
         auto& entry = this->context_.get_completion_queue_entry();
         entry.user_data = cop;
@@ -2503,6 +2568,8 @@ class ucx_am_context::send_sender_t {
       stopCallback_;
     bool stopCallbackConstructed_ = false;
     std::atomic_char refCount_{1};
+    std::optional<CqeEntryCallback> cqe_cb_;
+    std::optional<DirectEntryCallback> direct_cb_;
     cancel_operation cop_{*this};
   };
 
@@ -2981,13 +3048,13 @@ class ucx_am_context::ucx_accept_callback : public ucx_callback {
     client_id_ = context.get_client_id();
   }
 
-  virtual void operator()(ucs_status_t status) {
+  virtual void operator()([[maybe_unused]] ucs_status_t status) {
     UNIFEX_ASSERT(connection_->ucx_status() == status);
   }
 
  private:
   [[maybe_unused]] ucx_am_context& context_;
-  ucx_connection* connection_;
+  [[maybe_unused]] ucx_connection* connection_;
 };
 
 class ucx_am_context::ucx_connect_callback : public ucx_callback {
@@ -2997,13 +3064,13 @@ class ucx_am_context::ucx_connect_callback : public ucx_callback {
     client_id_ = context.get_client_id();
   }
 
-  virtual void operator()(ucs_status_t status) {
+  virtual void operator()([[maybe_unused]] ucs_status_t status) {
     UNIFEX_ASSERT(connection_->ucx_status() == status);
   }
 
  private:
   [[maybe_unused]] ucx_am_context& context_;
-  ucx_connection* connection_;
+  [[maybe_unused]] ucx_connection* connection_;
 };
 
 class ucx_am_context::ucx_disconnect_callback : public ucx_callback {
@@ -3357,6 +3424,11 @@ class ucx_am_context::connect_sender {
         // Check if operation has been canceled
         if (cancel_flag_.load(std::memory_order_consume)) {
           this->result_ = UCS_ERR_CANCELED;
+          auto& entry = this->context_.get_completion_queue_entry();
+          entry.user_data = reinterpret_cast<std::uintptr_t>(
+            static_cast<completion_base*>(this));
+          this->execute_ = &operation::on_connect;
+          entry.res = UCS_ERR_CANCELED;
           return true;
         }
 
@@ -3526,6 +3598,10 @@ class ucx_am_context::connect_sender {
       static void on_stop_complete(operation_base* op) noexcept {
         auto& self =
           *static_cast<operation*>(&(static_cast<cancel_operation*>(op)->op_));
+        if (self.refCount_.fetch_sub(1, std::memory_order_acq_rel) != 1) {
+          // Waiting for on_connect to complete
+          return;
+        }
         self.stopCallback_.destruct();
         unifex::set_done(std::move(self.receiver_));
       }
@@ -3897,7 +3973,8 @@ class ucx_am_context::accept_connection {
     sockaddr_in* addr = new sockaddr_in{
       .sin_family = AF_INET,
       .sin_port = htons(port),
-      .sin_addr = {.s_addr = INADDR_ANY}};
+      .sin_addr = {.s_addr = INADDR_ANY},
+      .sin_zero = {0}};
     socket_ = std::unique_ptr<sockaddr>(reinterpret_cast<sockaddr*>(addr));
     addrlen_ = sizeof(sockaddr_in);
   }
