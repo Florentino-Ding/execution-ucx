@@ -483,10 +483,6 @@ void UcxConnection::cancel_send() {
       ++count;
       UCX_CONN_DEBUG << "canceling " << request->what << " request " << request
                      << " #" << count << std::endl;
-      if (request->callback) {
-        (*request->callback)(UCS_ERR_CANCELED);
-        request->callback = nullptr;
-      }
       ucp_request_cancel(worker_, request);
     }
   }
@@ -504,10 +500,6 @@ void UcxConnection::cancel_recv() {
       ++count;
       UCX_CONN_DEBUG << "canceling " << request->what << " request " << request
                      << " #" << count << std::endl;
-      if (request->callback) {
-        (*request->callback)(UCS_ERR_CANCELED);
-        request->callback = nullptr;
-      }
       ucp_request_cancel(worker_, request);
     }
   }
@@ -524,10 +516,6 @@ void UcxConnection::cancel_all() {
     ++count;
     UCX_CONN_DEBUG << "canceling " << request->what << " request " << request
                    << " #" << count;
-    if (request->callback) {
-      (*request->callback)(UCS_ERR_CANCELED);
-      request->callback = nullptr;
-    }
     ucp_request_cancel(worker_, request);
   }
 }

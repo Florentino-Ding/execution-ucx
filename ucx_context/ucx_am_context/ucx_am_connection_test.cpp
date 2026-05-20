@@ -22,14 +22,11 @@ limitations under the License.
 #include <ucs/datastruct/list.h>
 
 #include <atomic>
-#include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <functional>
 #include <future>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -166,7 +163,7 @@ TEST_F(UcxConnectionTest, Connect) {
   // Create a connect callback
   std::atomic<bool> connect_callback_called(false);
   auto connect_callback = std::make_unique<MockCallback>(
-    [&connect_callback_called](ucs_status_t status) {
+    [&connect_callback_called](ucs_status_t /*status*/) {
       // Connection might fail in test environment, so we don't assert on
       // status
       connect_callback_called = true;

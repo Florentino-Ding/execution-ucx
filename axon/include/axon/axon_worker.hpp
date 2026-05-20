@@ -1069,6 +1069,11 @@ class AxonWorker {
             return;
           }
 
+          if (!conn_id.has_value()) {
+            receiver.set_error(conn_id.error());
+            return;
+          }
+
           auto callback =
             [&receiver](
               RpcResponseHandlerExpectedType&& resp_handler_expected) mutable {

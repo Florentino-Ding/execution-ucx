@@ -127,6 +127,8 @@ class UcxBuffer {
       } else {
         mr_->deallocate(type_, buffer_.data, buffer_.size);
       }
+      buffer_ = {nullptr, 0};
+      own_buffer_ = false;
     }
   }
 

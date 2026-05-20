@@ -1274,6 +1274,18 @@ void ucx_am_context::destroy_connections() {
 
   // wait for all connections being completely disconnected
   wait_disconnected_connections();
+
+  // Force disconnect_direct on all remaining connections in failedConns_ and
+  // disconnectingConns_ to ensure their endpoints are closed before the
+  // ucpWorker_ is destroyed.
+  for (auto& failed_conn : conn_manager_.get_failed_connections()) {
+    failed_conn->disconnect_direct();
+  }
+  for (auto& disconnecting_conn :
+       conn_manager_.get_disconnecting_connections()) {
+    disconnecting_conn->disconnect_direct();
+  }
+  conn_manager_.clear();
 }
 
 void ucx_am_context::destroy_worker() {

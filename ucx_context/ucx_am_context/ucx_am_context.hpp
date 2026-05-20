@@ -746,11 +746,20 @@ class ucx_am_context {
       op.stopCallbackConstructed_ = true;
     }
 
-    if (__builtin_expect(stop_token.stop_requested(), 0)) {
-      unifex::set_done(std::move(op.receiver_));
-      return false;
+    if constexpr (requires { op.cancel_flag_; }) {
+      // For operations supporting our symmetric ref-counted cancel machine,
+      // stopCallback_.construct() above will have synchronously triggered
+      // request_stop() if stop_requested() is true, safely scheduling cancel on
+      // the IO thread. We must NOT synchronously set_done here to avoid UAF and
+      // crashes.
+      return true;
+    } else {
+      if (__builtin_expect(stop_token.stop_requested(), 0)) {
+        unifex::set_done(std::move(op.receiver_));
+        return false;
+      }
+      return true;
     }
-    return true;
   }
 
   bool is_running_on_io_thread() const noexcept;
@@ -1545,6 +1554,16 @@ class ucx_am_context::recv_buffer_sender_t {
         // Handle cancellation
         if (cancel_flag_.load(std::memory_order_consume)) {
           this->result_ = UCS_ERR_CANCELED;
+          auto amDescOpt = context_.amDescMap_.pop(this->am_desc_key_);
+          if (amDescOpt.has_value()) {
+            context_.release_rndv_am_desc(std::move(amDescOpt.value()), mr_);
+          }
+          auto op_ = reinterpret_cast<std::uintptr_t>(
+            static_cast<completion_base*>(this));
+          auto& entry = this->context_.get_completion_queue_entry();
+          entry.user_data = op_;
+          entry.res = UCS_ERR_CANCELED;
+          this->execute_ = &operation::on_read_complete;
           return true;
         }
         // Get operation pointer for completion
@@ -1673,23 +1692,31 @@ class ucx_am_context::recv_buffer_sender_t {
 
     void request_stop_local() noexcept {
       UNIFEX_ASSERT(context_.is_running_on_io_thread());
+
+      if (__builtin_expect(conn_.has_value(), 1)) {
+        auto& conn_ref = conn_.value().get();
+        const auto conn_id = conn_ref.id();
+        if (context_.conn_manager_.is_connection_valid(conn_id)) {
+          if (this->request_ != nullptr) {
+            conn_ref.cancel_request(this->request_);
+          }
+        }
+      }
+
       auto populateSqe = [this]() noexcept {
         auto cop = reinterpret_cast<std::uintptr_t>(
           static_cast<completion_base*>(&cop_));
-        if (__builtin_expect(conn_.has_value(), 1)) {
-          auto& conn_ref = conn_.value().get();
-          if (request_) {
-            conn_ref.cancel_request(request_);
-          }
-        }
         auto& entry = this->context_.get_completion_queue_entry();
         entry.user_data = cop;
         entry.res = UCS_ERR_CANCELED;
         this->result_ = UCS_ERR_CANCELED;
         cop_.execute_ = &cancel_operation::on_stop_complete;
 
-        // Ensure the operation is removed from the map
-        context_.amDescMap_.pop(this->am_desc_key_);
+        // Ensure the operation is removed from the map and properly released
+        auto amDescOpt = context_.amDescMap_.pop(this->am_desc_key_);
+        if (amDescOpt.has_value()) {
+          context_.release_rndv_am_desc(std::move(amDescOpt.value()), mr_);
+        }
       };
 
       if (!context_.try_submit_io(populateSqe)) {
@@ -1747,6 +1774,10 @@ class ucx_am_context::recv_buffer_sender_t {
       static void on_stop_complete(operation_base* op) noexcept {
         auto& self =
           *static_cast<operation*>(&(static_cast<cancel_operation*>(op)->op_));
+        if (self.refCount_.fetch_sub(1, std::memory_order_acq_rel) != 1) {
+          // Waiting for on_read_complete to complete
+          return;
+        }
         self.stopCallback_.destruct();
         unifex::set_done(std::move(self.receiver_));
       }
@@ -2126,9 +2157,9 @@ class ucx_am_context::recv_header_sender {
       } else if (self.result_ == UCS_ERR_CANCELED) {
         UNIFEX_TRY {
           if (self.header_own_.has_value()) {
-            self.header_own_.value().~UcxHeader();
+            self.header_own_.reset();
           } else if (self.buffer_own_.has_value()) {
-            self.buffer_own_.value().~UcxBuffer();
+            self.buffer_own_.reset();
           }
         }
         UNIFEX_CATCH(...) {
@@ -2139,9 +2170,9 @@ class ucx_am_context::recv_header_sender {
       } else {
         UNIFEX_TRY {
           if (self.header_own_.has_value()) {
-            self.header_own_.value().~UcxHeader();
+            self.header_own_.reset();
           } else if (self.buffer_own_.has_value()) {
-            self.buffer_own_.value().~UcxBuffer();
+            self.buffer_own_.reset();
           }
         }
         UNIFEX_CATCH(...) {
@@ -3393,6 +3424,11 @@ class ucx_am_context::connect_sender {
         // Check if operation has been canceled
         if (cancel_flag_.load(std::memory_order_consume)) {
           this->result_ = UCS_ERR_CANCELED;
+          auto& entry = this->context_.get_completion_queue_entry();
+          entry.user_data = reinterpret_cast<std::uintptr_t>(
+            static_cast<completion_base*>(this));
+          this->execute_ = &operation::on_connect;
+          entry.res = UCS_ERR_CANCELED;
           return true;
         }
 
@@ -3562,6 +3598,10 @@ class ucx_am_context::connect_sender {
       static void on_stop_complete(operation_base* op) noexcept {
         auto& self =
           *static_cast<operation*>(&(static_cast<cancel_operation*>(op)->op_));
+        if (self.refCount_.fetch_sub(1, std::memory_order_acq_rel) != 1) {
+          // Waiting for on_connect to complete
+          return;
+        }
         self.stopCallback_.destruct();
         unifex::set_done(std::move(self.receiver_));
       }

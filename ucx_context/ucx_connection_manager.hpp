@@ -91,6 +91,8 @@ class ConnectionManager {
   void add_connection_to_disconnecting_queue(
     std::unique_ptr<UcxConnection> conn);
 
+  void clear();
+
  private:
   // Alive connections
   conn_vector_t connections_;

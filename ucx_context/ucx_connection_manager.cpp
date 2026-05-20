@@ -213,5 +213,13 @@ void ConnectionManager::remove_disconnected_connections() {
   }
 }
 
+void ConnectionManager::clear() {
+  active_map_.clear();
+  inactive_map_.clear();
+  failedConns_.clear();
+  disconnectingConns_.clear();
+  connections_.clear();
+}
+
 }  // namespace ucxx
 }  // namespace eux

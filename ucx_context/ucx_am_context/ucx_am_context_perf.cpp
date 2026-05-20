@@ -230,8 +230,9 @@ void receiver_task(
 
 std::pair<int, double> sender_task(
   const ucx_am_context::scheduler& scheduler,
-  std::vector<std::byte>& server_ucp_address, inplace_stop_source& stop_source,
-  size_t header_size, size_t msg_size, int warmup_iters, int iters) {
+  std::vector<std::byte>& server_ucp_address,
+  [[maybe_unused]] inplace_stop_source& stop_source, size_t header_size,
+  size_t msg_size, int warmup_iters, int iters) {
   auto conn_id =
     sync_wait(connect_endpoint(scheduler, server_ucp_address)).value();
 

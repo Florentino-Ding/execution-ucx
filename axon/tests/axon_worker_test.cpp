@@ -698,6 +698,7 @@ TEST_F(AxonWorkerIntegrationTest, RobustnessAndConcurrency) {
       // 2. Large Payload Test (4MB)
       {
         LOGX("[Client-Rob] Starting Large Payload Test\n");
+        worker.SetTimeout(std::chrono::milliseconds(2000));
         size_t size = 4 * 1024 * 1024;
         ucxx::UcxBuffer payload(*mr_, ucx_memory_type::HOST, size);
         std::memset(payload.data(), 'A', size);
@@ -717,6 +718,7 @@ TEST_F(AxonWorkerIntegrationTest, RobustnessAndConcurrency) {
         ASSERT_EQ(data[0], 'A');
         ASSERT_EQ(data[size - 1], 'A');
         LOGX("[Client-Rob] Large Payload Test Passed\n");
+        worker.SetTimeout(std::chrono::milliseconds(10));
       }
 
       // 3. Server Timeout Test
@@ -955,6 +957,7 @@ TEST_F(AxonWorkerIntegrationTest, BackpressureLargeMessage) {
           ucxx::UcxBuffer payload(*mr_, ucx_memory_type::HOST, large_size);
           std::memset(payload.data(), 'B', large_size);
 
+          worker.SetTimeout(std::chrono::milliseconds(2000));
           auto sender = worker.InvokeRpc<ucxx::UcxBuffer, ucxx::UcxBuffer>(
                           "server_worker_bpl", rpc::session_id_t{1},
                           rpc::function_id_t{4002},
@@ -973,6 +976,7 @@ TEST_F(AxonWorkerIntegrationTest, BackpressureLargeMessage) {
                           });
 
           auto res = unifex::sync_wait(std::move(sender));
+          worker.SetTimeout(std::chrono::milliseconds(10));
           ASSERT_TRUE(res.has_value());
           ASSERT_TRUE(res.value())
             << "Large message RPC should have failed with StorageBackpressure "
@@ -995,11 +999,13 @@ TEST_F(AxonWorkerIntegrationTest, BackpressureLargeMessage) {
           ucxx::UcxBuffer payload(*mr_, ucx_memory_type::HOST, large_size);
           std::memset(payload.data(), 'C', large_size);
 
+          worker.SetTimeout(std::chrono::milliseconds(2000));
           auto res = unifex::sync_wait(
             worker.InvokeRpc<ucxx::UcxBuffer, ucxx::UcxBuffer>(
               "server_worker_bpl", rpc::session_id_t{1},
               rpc::function_id_t{4002}, rpc::utils::workflow_id_t{0},
               std::move(payload)));
+          worker.SetTimeout(std::chrono::milliseconds(10));
           ASSERT_TRUE(res.has_value());
           auto& [header, ret_payload] = res.value();
           ASSERT_EQ(header->status, std::error_code{});
@@ -1213,7 +1219,7 @@ TEST_F(AxonWorkerIntegrationTest, TensorMetaBufferTransfer) {
 
   if (client_pid == 0) {
     // Child 2 - Client
-    try {
+    {
       mr_ = std::make_unique<ucxx::DefaultUcxMemoryResourceManager>();
       close(pipe_fd[1]);
       size_t addr_size;
@@ -1513,11 +1519,14 @@ TEST_F(AxonWorkerIntegrationTest, TensorMetaBufferTransfer) {
              cista::offset::string{"threshold"}});
           header.params = std::move(params);
 
-          // Invoke RPC
+          // Invoke RPC with an increased timeout for large message loopback
+          // transfer
+          worker.SetTimeout(std::chrono::milliseconds(2000));
           auto res = unifex::sync_wait(
             worker.InvokeRpc<ucxx::UcxBufferVec, ucxx::UcxBufferVec>(
               "server_worker_tm", std::move(header),
               std::optional<ucxx::UcxBufferVec>(std::move(payload))));
+          worker.SetTimeout(std::chrono::milliseconds(10));
 
           ASSERT_TRUE(res.has_value())
             << "UcxBufferVec large message RPC failed";
@@ -1780,22 +1789,6 @@ TEST_F(AxonWorkerIntegrationTest, TensorMetaBufferTransfer) {
         std::exit(1);
       }
       std::exit(0);
-    } catch (const errors::AxonErrorException& e) {
-      LOGX(
-        "[Client-TM] Caught AxonErrorException: %s (status: %s)\n",
-        e.context().what.c_str(), e.context().status.GetErrorMessage().c_str());
-      std::exit(1);
-    } catch (const rpc::RpcException& e) {
-      LOGX(
-        "[Client-TM] Caught RpcException: %s (code: %s)\n", e.what(),
-        e.code().message().c_str());
-      std::exit(1);
-    } catch (const std::exception& e) {
-      LOGX("[Client-TM] Caught std::exception: %s\n", e.what());
-      std::exit(1);
-    } catch (...) {
-      LOGX("[Client-TM] Caught unknown exception\n");
-      std::exit(1);
     }
   }
 
