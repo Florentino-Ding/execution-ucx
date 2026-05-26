@@ -57,20 +57,43 @@ void PythonWakeManager::NotifyPython() {
 }
 
 void PythonWakeManager::Enqueue(Task&& task) {
+  if (PyGILState_Check() == 1) {
+    try {
+      (*task)();
+    } catch (const std::exception& e) {
+      std::cerr << "PythonWakeManager inline task threw exception: " << e.what()
+                << std::endl;
+    } catch (...) {
+      std::cerr << "PythonWakeManager inline task threw unknown exception"
+                << std::endl;
+    }
+    return;
+  }
+
   auto* node = new TaskNode{.task = std::move(task)};
   bool need_wakeup = queue_.enqueue(node);
   if (need_wakeup) {
     NotifyPython();
-  } else {
   }
 }
 
 std::size_t PythonWakeManager::ProcessQueue() {
+  uint64_t val = 0;
+  ssize_t read_bytes;
+  do {
+    read_bytes = ::read(event_fd_, &val, sizeof(val));
+  } while (read_bytes < 0 && errno == EINTR);
+
+  if (read_bytes < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+    throw std::runtime_error("Failed to read from eventfd");
+  }
+
   // Ensure we are active if a caller invokes while inactive with an empty
   // queue.
   (void)queue_.try_mark_active();
 
   std::size_t processed = 0;
+
   for (;;) {
     auto batch = queue_.dequeue_all();
     if (batch.empty()) {
@@ -81,7 +104,6 @@ std::size_t PythonWakeManager::ProcessQueue() {
       continue;
     }
 
-    nb::gil_scoped_acquire acquire;
     while (!batch.empty()) {
       auto* node = batch.pop_front();
       if (!node) continue;
@@ -205,6 +227,7 @@ bool PythonWakeManager::UnregisterAsyncioReader() {
     // We use ProcessQueue (not ClearQueue) because other components are still
     // active, so tasks must be executed, not discarded.
     // This fixes the HANG in concurrent tests.
+    nb::gil_scoped_acquire acquire;
     ProcessQueue();
     return true;
   }
