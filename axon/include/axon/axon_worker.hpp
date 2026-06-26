@@ -1193,23 +1193,27 @@ class AxonWorker {
                    });
         });
 
-    return unifex::stop_when(
-             unifex::when_all(
-               std::move(send_sender),
-               std::move(recv_callback_sender))  //
-             ,
-             std::move(timeout_sender))
-           | unifex::then([](auto&& send_result, auto&& recv_result) {
-               return std::get<0>(std::get<0>(std::move(recv_result)));
-             })
-           | unifex::let_error([error_ctx](auto&& error) {
-               return RethrowErrorContextHelper_{.error_ctx = error_ctx}(
-                 std::forward<decltype(error)>(error));
-             })
-           | unifex::let_done([error_ctx](auto&&...) {
-               return ReturnTimeoutErrorContextHelper_{
-                 .error_ctx = error_ctx}();
-             });
+    // If request is a one-way invoke.
+    if (request_header.request_flags & rpc::RequestFlags::ONE_WAY) {
+    } else {
+      return unifex::stop_when(
+               unifex::when_all(
+                 std::move(send_sender),
+                 std::move(recv_callback_sender))  //
+               ,
+               std::move(timeout_sender))
+             | unifex::then([](auto&& send_result, auto&& recv_result) {
+                 return std::get<0>(std::get<0>(std::move(recv_result)));
+               })
+             | unifex::let_error([error_ctx](auto&& error) {
+                 return RethrowErrorContextHelper_{.error_ctx = error_ctx}(
+                   std::forward<decltype(error)>(error));
+               })
+             | unifex::let_done([error_ctx](auto&&...) {
+                 return ReturnTimeoutErrorContextHelper_{
+                   .error_ctx = error_ctx}();
+               });
+    }
   }
 
  private:

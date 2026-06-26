@@ -41,10 +41,17 @@ using utils::HybridLogicalClock;
 using utils::TensorMeta;
 using utils::workflow_id_t;
 
+enum class RequestFlagType : uint32_t {
+  NONE = 0,
+  ONEWAY =
+    1 << 0,  // Indicates that the request is one-way (no response expected)
+};
+
 // Strong type definitions for type safety
 using function_id_t = cista::strong<uint32_t, struct function_id_tag>;
 using session_id_t = cista::strong<uint32_t, struct session_id_tag>;
 using request_id_t = cista::strong<uint32_t, struct request_id_tag>;
+using request_flag_t = cista::strong<RequestFlagType, struct request_flag_tag>;
 
 // Parameter types for RPC calls
 enum class ParamType : uint8_t {
@@ -338,6 +345,7 @@ struct RpcRequestHeader : public RpcMessageAccessor<RpcRequestHeader> {
   session_id_t session_id;             // RPC session identifier
   request_id_t request_id;             // Unique request identifier
   function_id_t function_id;           // Target function identifier
+  request_flag_t request_flags;        // Indicates if the request is one-way
   utils::HybridLogicalClock hlc{};     // Hybrid logical clock
   utils::workflow_id_t workflow_id{};  // Workflow identifier
   data::vector<ParamMeta> params;      // Parameter list
@@ -348,6 +356,7 @@ struct RpcRequestHeader : public RpcMessageAccessor<RpcRequestHeader> {
     : session_id(other.session_id),
       request_id(other.request_id),
       function_id(other.function_id),
+      request_flags(other.request_flags),
       hlc(other.hlc),
       workflow_id(other.workflow_id),
       params(other.params) {}
@@ -357,6 +366,7 @@ struct RpcRequestHeader : public RpcMessageAccessor<RpcRequestHeader> {
       session_id = other.session_id;
       request_id = other.request_id;
       function_id = other.function_id;
+      request_flags = other.request_flags;
       hlc = other.hlc;
       workflow_id = other.workflow_id;
       params = other.params;
@@ -369,7 +379,8 @@ struct RpcRequestHeader : public RpcMessageAccessor<RpcRequestHeader> {
 
   auto cista_members() const {
     return std::tie(
-      session_id, request_id, function_id, hlc, workflow_id, params);
+      session_id, request_id, function_id, request_flags, hlc, workflow_id,
+      params);
   }
 
   // Add a parameter to the request

@@ -943,6 +943,7 @@ void RegisterRuntime(nb::module_& m) {
       request_header.session_id = rpc::session_id_t{session_id};
       request_header.function_id = function_id;
       request_header.workflow_id = rpc::utils::workflow_id_t{workflow_id};
+      request_header.request_flags = rpc::RequestFlags::NONE;
 
       // Use modular InvokeContext for single-pass argument processing
       python::InvokeContext ctx(request_header);
@@ -1016,6 +1017,115 @@ void RegisterRuntime(nb::module_& m) {
       }
 
       return future;
+    },
+    nb::rv_policy::none,  // Don't apply any rv_policy to prevent copy of self
+    nb::arg("args"), nb::arg("worker_name"), nb::arg("session_id"),
+    nb::arg("function"), nb::arg("workflow_id") = 0,
+    nb::arg("memory_policy") = nb::none(),
+    nb::arg("from_dlpack_fn") = nb::none(),
+    "Invoke RPC with natural Python arguments (automatically handles Tensor "
+    "payloads).\n");
+
+  cls.def(
+    "notify",
+    [](
+      axon::AxonRuntime& self, nb::args args, const std::string& worker_name,
+      uint32_t session_id, nb::object function, uint32_t workflow_id,
+      nb::object memory_policy_factory,
+      nb::object from_dlpack_fn) {  // Removed kwargs
+      // Resolve function ID
+      rpc::function_id_t function_id;
+      if (nb::isinstance<nb::int_>(function)) {
+        function_id = rpc::function_id_t{nb::cast<uint32_t>(function)};
+      } else if (nb::isinstance<nb::str>(function)) {
+        std::string fname = nb::cast<std::string>(function);
+        function_id = rpc::function_id_t{ComputeFunctionId(fname, worker_name)};
+      } else {
+        throw std::invalid_argument(
+          "function_id must be int (ID) or str (name)");
+      }
+
+      // Build header
+      // TODO: Add a bool flag so that server side could know if this is a
+      // oneway RPC and not send back any response
+      rpc::RpcRequestHeader request_header;
+      request_header.session_id = rpc::session_id_t{session_id};
+      request_header.function_id = function_id;
+      request_header.workflow_id = rpc::utils::workflow_id_t{workflow_id};
+      request_header.request_flags |= rpc::RequestFlags::ONEWAY;
+
+      // Use modular InvokeContext for single-pass argument processing
+      python::InvokeContext ctx(request_header);
+
+      // Single pass: classify and collect all arguments
+      for (size_t i = 0; i < args.size(); ++i) {
+        nb::object obj = nb::cast<nb::object>(args[i]);
+        switch (python::ClassifyArg(obj)) {
+          case python::ArgKind::SingleTensor:
+            ctx.add_tensor(std::move(obj));
+            break;
+          case python::ArgKind::FlatTensorList: {
+            nb::sequence seq = nb::cast<nb::sequence>(obj);
+            for (size_t ti = 0; ti < nb::len(seq); ++ti)
+              ctx.add_tensor(nb::cast<nb::object>(seq[ti]));
+            break;
+          }
+          case python::ArgKind::NestedTensorList:
+            ctx.add_nested_tensor_list(std::move(obj));
+            break;
+          case python::ArgKind::NonTensor:
+            ctx.add_non_tensor(std::move(obj));
+            break;
+        }
+      }
+
+      // Finalize header with tensor metadata (added at end for O(1) lookup)
+      ctx.finalize_header();
+
+      // Prepare for dispatch
+      bool use_custom_memory = !memory_policy_factory.is_none();
+      auto result_handler = python::CreateOnewayRpcResultHandler(
+        *self.GetMemoryResourceManagerShared(), future,
+        python::GetPythonWakeManager(), std::move(from_dlpack_fn));
+
+      // Dispatch based on tensor count
+      if (ctx.tensor_count() == 0) {
+        if (use_custom_memory) {
+          self.SpawnClientTask(python::InvokeRpcWithCustomMemory(
+            self, worker_name, std::move(request_header), std::monostate{},
+            memory_policy_factory, std::move(result_handler)));
+        } else {
+          self.SpawnClientTask(python::InvokeRpcWithHostPolicy(
+            self, worker_name, std::move(request_header), std::monostate{},
+            std::move(result_handler)));
+        }
+      } else if (ctx.tensor_count() == 1) {
+        ucxx::UcxBuffer buffer =
+          ctx.to_ucx_buffer(self.GetMemoryResourceManager().get());
+        if (use_custom_memory) {
+          self.SpawnClientTask(python::InvokeRpcWithCustomMemory(
+            self, worker_name, std::move(request_header), std::move(buffer),
+            memory_policy_factory, std::move(result_handler)));
+        } else {
+          self.SpawnClientTask(python::InvokeRpcWithHostPolicy(
+            self, worker_name, std::move(request_header), std::move(buffer),
+            std::move(result_handler)));
+        }
+      } else {
+        ucxx::UcxBufferVec buffer_vec =
+          ctx.to_ucx_buffer_vec(self.GetMemoryResourceManager().get());
+        if (use_custom_memory) {
+          self.SpawnClientTask(python::InvokeRpcWithCustomMemory(
+            self, worker_name, std::move(request_header), std::move(buffer_vec),
+            memory_policy_factory, std::move(result_handler)));
+        } else {
+          self.SpawnClientTask(python::InvokeRpcWithHostPolicy(
+            self, worker_name, std::move(request_header), std::move(buffer_vec),
+            std::move(result_handler)));
+        }
+      }
+
+      return nb::none();
     },
     nb::rv_policy::none,  // Don't apply any rv_policy to prevent copy of self
     nb::arg("args"), nb::arg("worker_name"), nb::arg("session_id"),
