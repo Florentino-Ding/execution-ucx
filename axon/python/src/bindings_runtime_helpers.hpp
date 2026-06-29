@@ -244,75 +244,18 @@ struct __attribute__((visibility("hidden"))) CreateRpcResultHandler {
 };
 
 struct __attribute__((visibility("hidden"))) CreateOnewayRpcResultHandler {
-  SharedPyObject future_;
   PythonWakeManager& manager_;
   SharedPyObject from_dlpack_;  // GIL-safe wrapper for from_dlpack_fn callable
   std::reference_wrapper<ucxx::UcxMemoryResourceManager> mr_;
 
   CreateOnewayRpcResultHandler(
-    ucxx::UcxMemoryResourceManager& mr, SharedPyObject future,
-    PythonWakeManager& manager, nb::object from_dlpack_fn = nb::none())
-    : future_(std::move(future)),
-      manager_(manager),
-      from_dlpack_(std::move(from_dlpack_fn)),
-      mr_(mr) {}
+    ucxx::UcxMemoryResourceManager& mr, PythonWakeManager& manager,
+    nb::object from_dlpack_fn = nb::none())
+    : manager_(manager), from_dlpack_(std::move(from_dlpack_fn)), mr_(mr) {}
 
   template <typename Sender>
   auto operator()(Sender&& sender) {
-    // Use SharedPyObject for both future and from_dlpack_fn to safely pass
-    // across threads
-    auto chained_sender =
-      unifex::just(future_, from_dlpack_)
-      | unifex::let_value(
-        [&manager = manager_, sender = std::forward<Sender>(sender), mr_ = mr_](
-          const SharedPyObject& future_in,
-          const SharedPyObject& from_dlpack_in) mutable {
-          SharedPyObject future = future_in;
-          SharedPyObject from_dlpack_fn = from_dlpack_in;
-          auto enhanced_sender =
-            std::move(sender)
-            | unifex::then([future, &manager, from_dlpack_fn,
-                            mr = mr_](auto&& result_pair) mutable {
-                try {
-                  auto& [response_header, returned_payload] = result_pair;
-                  using PayloadType = std::decay_t<decltype(returned_payload)>;
-                  if constexpr (std::is_same_v<PayloadType, std::monostate>) {
-                    HandleRpcSuccessResult<std::monostate>(
-                      mr, future, manager, std::move(response_header),
-                      std::move(returned_payload), from_dlpack_fn);
-                  } else if constexpr (std::is_same_v<
-                                         PayloadType, ucxx::UcxBuffer>) {
-                    HandleRpcSuccessResult<ucxx::UcxBuffer>(
-                      mr, future, manager, std::move(response_header),
-                      std::move(returned_payload), from_dlpack_fn);
-                  } else if constexpr (std::is_same_v<
-                                         PayloadType, ucxx::UcxBufferVec>) {
-                    HandleRpcSuccessResult<ucxx::UcxBufferVec>(
-                      mr, future, manager, std::move(response_header),
-                      std::move(returned_payload), from_dlpack_fn);
-                  } else if constexpr (std::is_same_v<
-                                         PayloadType, rpc::PayloadVariant>) {
-                    HandleRpcSuccessResult<rpc::PayloadVariant>(
-                      mr, future, manager, std::move(response_header),
-                      std::move(returned_payload), from_dlpack_fn);
-                  }
-                } catch (const std::exception& e) {
-                  throw std::runtime_error(std::format(
-                    "CRITICAL: Exception in CreateRpcResultHandler "
-                    "success path: {}",
-                    e.what()));
-                } catch (...) {
-                  throw std::runtime_error(
-                    std::format("CRITICAL: Unknown exception in "
-                                "CreateRpcResultHandler success path"));
-                }
-              })
-            | unifex::upon_error(CreateRpcErrorHandler(future, manager))
-            | unifex::upon_done(
-              [future, &manager]() mutable { HandleRpcDone(future, manager); });
-          return enhanced_sender;
-        });
-    return chained_sender;
+    return std::move(sender);
   }
 };
 

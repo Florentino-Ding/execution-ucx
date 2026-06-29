@@ -1195,6 +1195,17 @@ class AxonWorker {
 
     // If request is a one-way invoke.
     if (request_header.request_flags & rpc::RequestFlags::ONE_WAY) {
+      return unifex::stop_when(
+               std::move(send_sender), std::move(timeout_sender))
+             | unifex::then([](auto&&...) {})
+             | unifex::let_error([error_ctx](auto&& error) {
+                 return RethrowErrorContextHelper_{.error_ctx = error_ctx}(
+                   std::forward<decltype(error)>(error));
+               })
+             | unifex::let_done([error_ctx](auto&&...) {
+                 return ReturnTimeoutErrorContextHelper_{
+                   .error_ctx = error_ctx}();
+               });
     } else {
       return unifex::stop_when(
                unifex::when_all(
