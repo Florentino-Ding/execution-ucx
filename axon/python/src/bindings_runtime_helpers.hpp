@@ -255,7 +255,7 @@ struct __attribute__((visibility("hidden"))) CreateOnewayRpcResultHandler {
 
   template <typename Sender>
   auto operator()(Sender&& sender) {
-    return std::move(sender);
+    return std::move(sender) | unifex::then([](auto&&...) {});
   }
 };
 

@@ -53,6 +53,19 @@ using session_id_t = cista::strong<uint32_t, struct session_id_tag>;
 using request_id_t = cista::strong<uint32_t, struct request_id_tag>;
 using request_flag_t = cista::strong<RequestFlagType, struct request_flag_tag>;
 
+constexpr request_flag_t SetRequestFlag(
+  request_flag_t flags, RequestFlagType flag) noexcept {
+  using U = std::underlying_type_t<RequestFlagType>;
+  return request_flag_t{static_cast<RequestFlagType>(
+    static_cast<U>(cista::to_idx(flags)) | static_cast<U>(flag))};
+}
+
+constexpr bool HasRequestFlag(
+  request_flag_t flags, RequestFlagType flag) noexcept {
+  using U = std::underlying_type_t<RequestFlagType>;
+  return (static_cast<U>(cista::to_idx(flags)) & static_cast<U>(flag)) != 0;
+}
+
 // Parameter types for RPC calls
 enum class ParamType : uint8_t {
   PRIMITIVE_BOOL = 0,

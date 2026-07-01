@@ -943,7 +943,8 @@ void RegisterRuntime(nb::module_& m) {
       request_header.session_id = rpc::session_id_t{session_id};
       request_header.function_id = function_id;
       request_header.workflow_id = rpc::utils::workflow_id_t{workflow_id};
-      request_header.request_flags = rpc::RequestFlags::NONE;
+      request_header.request_flags =
+        rpc::request_flag_t{rpc::RequestFlagType::NONE};
 
       // Use modular InvokeContext for single-pass argument processing
       python::InvokeContext ctx(request_header);
@@ -1052,7 +1053,8 @@ void RegisterRuntime(nb::module_& m) {
       request_header.session_id = rpc::session_id_t{session_id};
       request_header.function_id = function_id;
       request_header.workflow_id = rpc::utils::workflow_id_t{workflow_id};
-      request_header.request_flags |= rpc::RequestFlags::ONEWAY;
+      request_header.request_flags = rpc::SetRequestFlag(
+        request_header.request_flags, rpc::RequestFlagType::ONEWAY);
 
       // Use modular InvokeContext for single-pass argument processing
       python::InvokeContext ctx(request_header);

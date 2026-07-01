@@ -350,10 +350,12 @@ AXON_KEY_INVOKE_RPC(
 
 #undef AXON_KEY_INVOKE_RPC_EXTERN
 
-#define AXON_INVOKE_RPC_IMPL(PayloadT, RespBufferT, MemPolicyT)               \
-  template auto AxonWorker::InvokeRpcImpl<PayloadT, RespBufferT, MemPolicyT>( \
-    std::expected<uint64_t, std::error_code> conn_id,                         \
-    rpc::RpcRequestHeader && request_header, PayloadT && payload,             \
+#define AXON_INVOKE_RPC_IMPL(PayloadT, RespBufferT, MemPolicyT)   \
+  template unifex::any_sender_of<                                 \
+    std::pair<rpc::ResponseHeaderUniquePtr, RespBufferT>>         \
+  AxonWorker::InvokeRpcImpl<PayloadT, RespBufferT, MemPolicyT>(   \
+    std::expected<uint64_t, std::error_code> conn_id,             \
+    rpc::RpcRequestHeader && request_header, PayloadT && payload, \
     MemPolicyT mem_policy);
 
 AXON_INVOKE_RPC_IMPL(ucxx::UcxBuffer, ucxx::UcxBuffer, AlwaysOnHostPolicy)
@@ -671,8 +673,8 @@ AxonWorker::AnySender AxonWorker::ServerDispatchAndManageLifecycle_(
   }
 
   auto handle_result_sender = unifex::let_value(
-    [this, conn_id, req_header_ptr,
-     func_name_ptr](const rpc::RpcInvokeResult<rpc::ReturnedPayload>& result) {
+    [this, conn_id, req_header_ptr, func_name_ptr](
+      const rpc::RpcInvokeResult<rpc::ReturnedPayload>& result) -> AnySender {
       if (server_metrics_observer_) {
         server_metrics_observer_->OnDispatchComplete(
           metrics::RpcMetricsContext{
@@ -686,11 +688,13 @@ AxonWorker::AnySender AxonWorker::ServerDispatchAndManageLifecycle_(
           },
           std::chrono::steady_clock::now());
       }
-      if (req_header_ptr->request_flags & rpc::RequestFlags::NO_RESPONSE) {
-        return unifex::just();
+      if (rpc::HasRequestFlag(
+            req_header_ptr->request_flags, rpc::RequestFlagType::ONEWAY)) {
+        return AnySender{unifex::just()};
       } else {
-        return ServerHandleSendResponse_(
-          conn_id, result.header, result.payload);
+        return AnySender{
+          ServerHandleSendResponse_(conn_id, result.header, result.payload)
+          | unifex::let_error(TransformErrorToRpcException_{})};
       }
     });
 

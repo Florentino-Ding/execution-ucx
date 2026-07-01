@@ -1041,6 +1041,26 @@ class AxonWorker {
     return worker_info->conn_id.value();
   }
 
+  template <typename RespBufferT>
+  auto MakeOnewayClientResult_()
+    -> std::pair<rpc::ResponseHeaderUniquePtr, RespBufferT> {
+    if constexpr (std::is_same_v<RespBufferT, std::monostate>) {
+      return {rpc::ResponseHeaderUniquePtr{}, std::monostate{}};
+    } else if constexpr (std::is_same_v<RespBufferT, ucxx::UcxBuffer>) {
+      return {
+        rpc::ResponseHeaderUniquePtr{},
+        ucxx::UcxBuffer{mr_.get(), ucx_memory_type::HOST, 0}};
+    } else if constexpr (std::is_same_v<RespBufferT, ucxx::UcxBufferVec>) {
+      return {
+        rpc::ResponseHeaderUniquePtr{},
+        ucxx::UcxBufferVec{
+          mr_.get(), ucx_memory_type::HOST, std::vector<size_t>{0}}};
+    } else {
+      return {
+        rpc::ResponseHeaderUniquePtr{}, rpc::PayloadVariant{std::monostate{}}};
+    }
+  }
+
   // --- Sender Implementation ---
   template <typename PayloadT, typename RespBufferT, typename MemPolicyT>
     requires(rpc::is_payload_v<PayloadT>
@@ -1053,7 +1073,9 @@ class AxonWorker {
     std::expected<uint64_t, std::error_code> conn_id,
     rpc::RpcRequestHeader&& request_header,
     PayloadT&& payload,
-    MemPolicyT mem_policy) {
+    MemPolicyT mem_policy)
+    -> unifex::any_sender_of<
+      std::pair<rpc::ResponseHeaderUniquePtr, RespBufferT>> {
     // Setup receiver
     auto recv_callback_sender =
       unifex::create<rpc::ResponseHeaderUniquePtr, PayloadOrKey>(
@@ -1193,16 +1215,13 @@ class AxonWorker {
                    });
         });
 
-    // If request is a one-way invoke.
-    if (request_header.request_flags & rpc::RequestFlags::ONE_WAY) {
+    // If request is a one-way invoke, complete after the send succeeds.
+    if (rpc::HasRequestFlag(
+          request_header.request_flags, rpc::RequestFlagType::ONEWAY)) {
       return unifex::stop_when(
-               unifex::when_all(
-                 std::move(send_sender),
-                 std::move(recv_callback_sender))  //
-               ,
-               std::move(timeout_sender))
-             | unifex::then([](auto&& send_result, auto&& recv_result) {
-                 return std::get<0>(std::get<0>(std::move(recv_result)));
+               std::move(send_sender), std::move(timeout_sender))
+             | unifex::then([this](auto&&...) {
+                 return MakeOnewayClientResult_<RespBufferT>();
                })
              | unifex::let_error([error_ctx](auto&& error) {
                  return RethrowErrorContextHelper_{.error_ctx = error_ctx}(
@@ -1211,7 +1230,8 @@ class AxonWorker {
              | unifex::let_done([error_ctx](auto&&...) {
                  return ReturnTimeoutErrorContextHelper_{
                    .error_ctx = error_ctx}();
-               });
+               })
+             | unifex::let_error(TransformErrorToRpcException_{});
     } else {
       return unifex::stop_when(
                unifex::when_all(
@@ -1229,7 +1249,8 @@ class AxonWorker {
              | unifex::let_done([error_ctx](auto&&...) {
                  return ReturnTimeoutErrorContextHelper_{
                    .error_ctx = error_ctx}();
-               });
+               })
+             | unifex::let_error(TransformErrorToRpcException_{});
     }
   }
 
@@ -1926,7 +1947,8 @@ AXON_KEY_INVOKE_RPC_EXTERN(
 #undef AXON_KEY_INVOKE_RPC_EXTERN
 
 #define AXON_RPC_INVOKE_IMPL_EXTERN(PayloadT, RespBufferT, MemPolicyT) \
-  extern template auto                                                 \
+  extern template unifex::any_sender_of<                               \
+    std::pair<rpc::ResponseHeaderUniquePtr, RespBufferT>>              \
   AxonWorker::InvokeRpcImpl<PayloadT, RespBufferT, MemPolicyT>(        \
     std::expected<uint64_t, std::error_code> conn_id,                  \
     rpc::RpcRequestHeader && request_header, PayloadT && payload,      \
