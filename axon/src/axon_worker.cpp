@@ -686,7 +686,12 @@ AxonWorker::AnySender AxonWorker::ServerDispatchAndManageLifecycle_(
           },
           std::chrono::steady_clock::now());
       }
-      return ServerHandleSendResponse_(conn_id, result.header, result.payload);
+      if (req_header_ptr->request_flags & rpc::RequestFlags::NO_RESPONSE) {
+        return unifex::just();
+      } else {
+        return ServerHandleSendResponse_(
+          conn_id, result.header, result.payload);
+      }
     });
 
   auto server_metrics_fn = [this, conn_id, req_header_ptr, func_name_ptr]() {
