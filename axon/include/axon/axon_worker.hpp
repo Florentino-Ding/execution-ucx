@@ -1192,6 +1192,7 @@ class AxonWorker {
         });
 
     // Setup sending sender
+    auto request_flags = request_header.request_flags;
     auto send_sender =
       unifex::just(std::move(request_header), std::move(payload))
       | unifex::then([](auto&& request_header, auto&& payload) {
@@ -1216,8 +1217,7 @@ class AxonWorker {
         });
 
     // If request is a one-way invoke, complete after the send succeeds.
-    if (rpc::HasRequestFlag(
-          request_header.request_flags, rpc::RequestFlagType::ONEWAY)) {
+    if (rpc::HasRequestFlag(request_flags, rpc::RequestFlagType::ONEWAY)) {
       return unifex::stop_when(
                std::move(send_sender), std::move(timeout_sender))
              | unifex::then([this](auto&&...) {
