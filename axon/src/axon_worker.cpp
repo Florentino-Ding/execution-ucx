@@ -136,7 +136,11 @@ void AxonWorker::StopServer() {
     return;
   }
 
-  server_stop_source_.request_stop();
+  // Serialize cancellation with receive setup. A stop callback arriving
+  // before the receive enters the pending queue can otherwise be lost.
+  unifex::sync_wait(unifex::on(
+    server_ctx_->get_scheduler(),
+    unifex::just_from([this]() { server_stop_source_.request_stop(); })));
 
   if (server_future_.has_value()) {
     unifex::sync_wait(std::move(server_future_.value()));
@@ -162,7 +166,11 @@ void AxonWorker::StopClient() {
     return;
   }
 
-  client_stop_source_.request_stop();
+  // Serialize cancellation with receive setup. A stop callback arriving
+  // before the receive enters the pending queue can otherwise be lost.
+  unifex::sync_wait(unifex::on(
+    client_ctx_->get_scheduler(),
+    unifex::just_from([this]() { client_stop_source_.request_stop(); })));
 
   if (client_future_.has_value()) {
     unifex::sync_wait(std::move(client_future_.value()));

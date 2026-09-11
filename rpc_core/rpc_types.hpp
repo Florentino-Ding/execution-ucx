@@ -355,10 +355,11 @@ struct RpcMessageAccessor {
 
 // RPC request header (contains all non-tensor parameters)
 struct RpcRequestHeader : public RpcMessageAccessor<RpcRequestHeader> {
-  session_id_t session_id;             // RPC session identifier
-  request_id_t request_id;             // Unique request identifier
-  function_id_t function_id;           // Target function identifier
-  request_flag_t request_flags;        // Indicates if the request is one-way
+  session_id_t session_id;    // RPC session identifier
+  request_id_t request_id;    // Unique request identifier
+  function_id_t function_id;  // Target function identifier
+  request_flag_t request_flags{
+    RequestFlagType::NONE};            // One-way only when explicitly requested
   utils::HybridLogicalClock hlc{};     // Hybrid logical clock
   utils::workflow_id_t workflow_id{};  // Workflow identifier
   data::vector<ParamMeta> params;      // Parameter list
