@@ -35,6 +35,15 @@ namespace python {
 
 namespace nb = nanobind;
 
+namespace {
+nb::object& GetRegisteredAsyncioLoop() {
+  // Match the process-wide manager's lifetime. Avoid Python decrefs after
+  // interpreter finalization from a static nanobind object destructor.
+  static auto* loop = new nb::object();
+  return *loop;
+}
+}  // namespace
+
 PythonWakeManager::PythonWakeManager() {
   event_fd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
   if (event_fd_ == -1) {
@@ -186,8 +195,9 @@ bool PythonWakeManager::RegisterAsyncioReader() {
     }
 
     // Check if we are already registered on THIS loop
+    auto& registered_loop = GetRegisteredAsyncioLoop();
     bool already_registered_on_loop =
-      (stored_loop_.ptr() != nullptr && stored_loop_.is(loop));
+      (registered_loop.ptr() != nullptr && registered_loop.is(loop));
     int old_count = reader_ref_count_.fetch_add(1, std::memory_order_acq_rel);
 
     if (already_registered_on_loop && old_count > 0) {
@@ -205,7 +215,7 @@ bool PythonWakeManager::RegisterAsyncioReader() {
     // Store the callback object reference to ensure it's not garbage collected
     // and can be properly removed later
     loop.attr("add_reader")(event_fd_, reader_callback_);
-    stored_loop_ = loop;
+    registered_loop = loop;
 
     return true;
   } catch (const nb::python_error& e) {

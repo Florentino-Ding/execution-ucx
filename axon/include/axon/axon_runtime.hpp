@@ -175,6 +175,8 @@ class AxonRuntime {
     worker_->SpawnClientTask(std::forward<Sender>(sender));
   }
 
+  bool IsClientRunning() const noexcept { return worker_->IsClientRunning(); }
+
   // --- RPC Server API ---
   template <
     typename ReceivedBufferT, typename Fn,

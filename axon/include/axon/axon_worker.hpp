@@ -216,6 +216,11 @@ class AxonWorker {
   void StopClient();
   void Stop();
 
+  bool IsClientRunning() const noexcept {
+    return client_running_.load(std::memory_order_acquire)
+           && !stopping_.load(std::memory_order_acquire);
+  }
+
   // --- Metrics ---
   void ReportServerMetrics();
   void ReportClientMetrics();

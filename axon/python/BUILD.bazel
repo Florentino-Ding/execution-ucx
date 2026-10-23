@@ -665,6 +665,16 @@ axon_pytest_test(
 )
 
 axon_pytest_test(
+    name = "test_rdt_fetch",
+    srcs = ["tests/test_rdt_fetch.py"],
+    legacy_create_init = False,
+    deps = [
+        requirement("numpy"),
+        requirement("pytest-asyncio"),
+    ],
+)
+
+axon_pytest_test(
     name = "test_types_enums",
     srcs = ["tests/test_types_enums.py"],
 )
@@ -798,6 +808,7 @@ test_suite(
         ":test_invoke_rpc",
         ":test_notify",
         ":test_numpy_rpc.py",
+        ":test_rdt_fetch",
         ":test_register_function",
         ":test_server_memory_policy",
         ":test_signature_based_rpc",

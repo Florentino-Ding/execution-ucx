@@ -64,16 +64,17 @@ class SenderToFuture {
     nb::module_ asyncio = GetAsyncioModule();
     // Create a new Future
     nb::object future = asyncio.attr("Future")();
+    SharedPyObject future_guard(future);
 
     // Create a receiver that will set the Future result/exception
     // Note: Using a lambda-based approach instead of local struct to avoid
     // template member function in local class issue
-    auto receiver = [future](auto&&... values) mutable {
+    auto receiver = [future_guard](auto&&... values) mutable {
       auto& wake_manager = GetPythonWakeManager();
       wake_manager.Enqueue(pro::make_proxy<TaskFacade>(
-        [future = std::move(future),
-         values = std::make_tuple(
-           std::forward<decltype(values)>(values)...)]() mutable {
+        [future_guard, values = std::make_tuple(
+                         std::forward<decltype(values)>(values)...)]() mutable {
+          nb::object future = future_guard.get();
           // Set result on the Future
           if constexpr (std::tuple_size_v<decltype(values)> == 0) {
             future.attr("set_result")(nb::none());
@@ -88,49 +89,51 @@ class SenderToFuture {
         }));
     };
 
-    auto error_handler = [future](std::exception_ptr ep) mutable noexcept {
+    auto error_handler = [future_guard](
+                           std::exception_ptr ep) mutable noexcept {
       auto& wake_manager = GetPythonWakeManager();
-      wake_manager.Enqueue(
-        pro::make_proxy<TaskFacade>([future = std::move(future), ep]() mutable {
-          try {
-            std::rethrow_exception(ep);
-          } catch (const nb::python_error& e) {
-            // Python exception - set it directly
-            // python_error doesn't have error() method, use PyErr_Occurred to
-            // get current exception
-            PyObject *exc_type, *exc_value, *exc_traceback;
-            PyErr_Fetch(&exc_type, &exc_value, &exc_traceback);
-            if (exc_value) {
-              future.attr("set_exception")(nb::steal<nb::object>(exc_value));
-            } else if (exc_type) {
-              future.attr("set_exception")(nb::steal<nb::object>(exc_type));
-            } else {
-              // Fallback: create RuntimeError
-              nb::module_ builtins = GetBuiltinsModule();
-              nb::object runtime_error =
-                builtins.attr("RuntimeError")(e.what());
-              future.attr("set_exception")(runtime_error);
-            }
-            PyErr_Restore(exc_type, exc_value, exc_traceback);
-          } catch (const std::exception& e) {
-            // C++ exception - convert to Python RuntimeError
+      wake_manager.Enqueue(pro::make_proxy<TaskFacade>([future_guard,
+                                                        ep]() mutable {
+        nb::object future = future_guard.get();
+        try {
+          std::rethrow_exception(ep);
+        } catch (const nb::python_error& e) {
+          // Python exception - set it directly
+          // python_error doesn't have error() method, use PyErr_Occurred to
+          // get current exception
+          PyObject *exc_type, *exc_value, *exc_traceback;
+          PyErr_Fetch(&exc_type, &exc_value, &exc_traceback);
+          if (exc_value) {
+            future.attr("set_exception")(nb::steal<nb::object>(exc_value));
+          } else if (exc_type) {
+            future.attr("set_exception")(nb::steal<nb::object>(exc_type));
+          } else {
+            // Fallback: create RuntimeError
             nb::module_ builtins = GetBuiltinsModule();
             nb::object runtime_error = builtins.attr("RuntimeError")(e.what());
             future.attr("set_exception")(runtime_error);
-          } catch (...) {
-            // Unknown exception
-            nb::module_ builtins = GetBuiltinsModule();
-            nb::object runtime_error =
-              builtins.attr("RuntimeError")("Unknown error from unifex sender");
-            future.attr("set_exception")(runtime_error);
           }
-        }));
+          PyErr_Restore(exc_type, exc_value, exc_traceback);
+        } catch (const std::exception& e) {
+          // C++ exception - convert to Python RuntimeError
+          nb::module_ builtins = GetBuiltinsModule();
+          nb::object runtime_error = builtins.attr("RuntimeError")(e.what());
+          future.attr("set_exception")(runtime_error);
+        } catch (...) {
+          // Unknown exception
+          nb::module_ builtins = GetBuiltinsModule();
+          nb::object runtime_error =
+            builtins.attr("RuntimeError")("Unknown error from unifex sender");
+          future.attr("set_exception")(runtime_error);
+        }
+      }));
     };
 
-    auto done_handler = [future]() mutable noexcept {
+    auto done_handler = [future_guard]() mutable noexcept {
       auto& wake_manager = GetPythonWakeManager();
       wake_manager.Enqueue(
-        pro::make_proxy<TaskFacade>([future = std::move(future)]() mutable {
+        pro::make_proxy<TaskFacade>([future_guard]() mutable {
+          nb::object future = future_guard.get();
           // Cancelled - set CancelledError
           nb::module_ asyncio = GetAsyncioModule();
           nb::object cancelled_error = asyncio.attr("CancelledError")();
