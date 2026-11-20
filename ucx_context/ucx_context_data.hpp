@@ -19,9 +19,7 @@
 #define UCX_CONTEXT_UCX_CONTEXT_DATA_HPP_
 
 #include <functional>
-#include <iostream>
 #include <memory>
-#include <numeric>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -202,6 +200,10 @@ class UcxBuffer {
    */
   bool own_buffer() const { return own_buffer_; }
 
+  bool has_release_callback() const noexcept {
+    return static_cast<bool>(ucp_release_fn_);
+  }
+
   /**
    * @brief Converts this UcxBuffer to a UcxBufferVec without copying by
    * splitting the buffer into multiple views.
@@ -381,52 +383,29 @@ class UcxBufferVec {
     }
   }
 
-  UcxBufferVec(UcxBufferVec&& other, bool own_buffer)
+  UcxBufferVec(UcxBufferVec&& other, bool own_buffer) noexcept
     : mr_(other.mr_),
       type_(other.type_),
       buffers_(std::move(other.buffers_)),
       mem_h_(other.mem_h_),
-      own_buffer_(own_buffer),
-      ucp_release_fn_(std::move(other.ucp_release_fn_)) {
+      own_buffer_(own_buffer && !other.backing_buffer_),
+      ucp_release_fn_(std::move(other.ucp_release_fn_)),
+      backing_buffer_(std::move(other.backing_buffer_)) {
     other.buffers_ = {};
     other.own_buffer_ = false;
     other.ucp_release_fn_ = nullptr;
   }
 
-  ~UcxBufferVec() {
-    if (own_buffer_) {
-      if (ucp_release_fn_) {
-        for (auto& buf : buffers_) {
-          ucp_release_fn_(buf.data);
-        }
-      } else if (true) {
-        for (auto& buf : buffers_) {
-          mr_->deallocate(type_, buf.data, buf.size);
-        }
-      } else {
-        std::cerr << "[Axon Fatal Warning] Lifecycle UB Detected: Tensor "
-                     "outlived AxonRuntime! Memory leaked to prevent Segfault."
-                  << std::endl;
-      }
-    }
-  }
+  ~UcxBufferVec() { release_buffers(); }
 
   UcxBufferVec(const UcxBufferVec&) = delete;
 
   UcxBufferVec(UcxBufferVec&& other) noexcept
-    : mr_(other.mr_),
-      type_(other.type_),
-      buffers_(std::move(other.buffers_)),
-      mem_h_(other.mem_h_),
-      own_buffer_(other.own_buffer_),
-      ucp_release_fn_(std::move(other.ucp_release_fn_)) {
-    other.buffers_ = {};
-    other.own_buffer_ = false;
-    other.ucp_release_fn_ = nullptr;
-  }
+    : UcxBufferVec(std::move(other), other.own_buffer_) {}
 
   UcxBufferVec& operator=(UcxBufferVec&& other) noexcept {
     if (this != &other) {
+      release_buffers();
       mr_ = other.mr_;
       type_ = other.type_;
       buffers_ = std::move(other.buffers_);
@@ -600,17 +579,24 @@ class UcxBufferVec {
   bool own_buffer() const { return own_buffer_; }
 
   std::vector<UcxBuffer> ExtractBuffers() && {
-    if (backing_buffer_ != nullptr) {
-      throw std::logic_error(
-        "ExtractBuffers() requires independently-allocated UcxBufferVec");
+    ucp_release_fn_t release = ucp_release_fn_;
+    if (backing_buffer_) {
+      // Each view keeps the whole allocation alive until its deleter goes away.
+      release = [owner = backing_buffer_](void*) {};
     }
     std::vector<UcxBuffer> result;
     result.reserve(buffers_.size());
     for (auto& buf : buffers_) {
-      result.emplace_back(
-        *mr_, type_, buf, mem_h_, own_buffer_, ucp_release_fn_);
+      result.emplace_back(*mr_, type_, buf, mem_h_, false, release);
+    }
+    // Transfer ownership only after all potentially throwing copies succeed.
+    for (auto& buf : result) {
+      buf.own_buffer_ = own_buffer_ || backing_buffer_ != nullptr;
     }
     own_buffer_ = false;
+    buffers_.clear();
+    ucp_release_fn_ = nullptr;
+    backing_buffer_.reset();
     return result;
   }
 
@@ -621,18 +607,17 @@ class UcxBufferVec {
   bool has_backing_buffer() const { return backing_buffer_ != nullptr; }
 
  private:
-  explicit UcxBufferVec(
-    UcxMemoryResourceManager& mr, ucx_memory_type_t type,
-    std::vector<ucx_buffer_t>&& buffers, void* mem_h, bool own_buffer,
-    ucp_release_fn_t&& ucp_release_fn,
-    std::unique_ptr<UcxBuffer>&& backing_buffer)
-    : mr_(&mr),
-      type_(type),
-      buffers_(std::move(buffers)),
-      mem_h_(mem_h),
-      own_buffer_(own_buffer),
-      ucp_release_fn_(std::move(ucp_release_fn)),
-      backing_buffer_(std::move(backing_buffer)) {}
+  void release_buffers() noexcept {
+    if (own_buffer_) {
+      for (const auto& buf : buffers_) {
+        if (ucp_release_fn_) {
+          ucp_release_fn_(buf.data);
+        } else {
+          mr_->deallocate(type_, buf.data, buf.size);
+        }
+      }
+    }
+  }
 
   UcxMemoryResourceManager* mr_;
   ucx_memory_type_t type_;
@@ -640,32 +625,27 @@ class UcxBufferVec {
   void* mem_h_;
   bool own_buffer_;
   ucp_release_fn_t ucp_release_fn_;
-  std::unique_ptr<UcxBuffer> backing_buffer_{nullptr};
+  std::shared_ptr<UcxBuffer> backing_buffer_;
 };
 
 inline UcxBufferVec UcxBuffer::to_buffer_vec(
   const std::vector<size_t>& sizes) && {
-  size_t total_size = std::accumulate(sizes.begin(), sizes.end(), 0UL);
-  if (total_size > buffer_.size) {
-    throw std::length_error("Total size of chunks exceeds buffer size");
-  }
-
   std::vector<ucx_buffer_t> buffers;
   buffers.reserve(sizes.size());
   char* current_ptr = static_cast<char*>(buffer_.data);
+  size_t remaining = buffer_.size;
   for (size_t size : sizes) {
+    if (size > remaining) {
+      throw std::length_error("Total size of chunks exceeds buffer size");
+    }
     buffers.push_back({current_ptr, size});
-    current_ptr += size;
+    if (size > 0) {
+      current_ptr += size;
+      remaining -= size;
+    }
   }
-
-  // `this` is an rvalue, so it will be moved.
-  auto backing_buffer = std::make_unique<UcxBuffer>(std::move(*this));
-  // Set own_buffer_ to false since the backing_buffer now owns the memory.
-  // The UcxBufferVec's destructor will not try to deallocate the chunks.
-  auto vec = UcxBufferVec(
-    *mr_, type_, std::move(buffers), mem_h_, false, std::move(ucp_release_fn_),
-    std::move(backing_buffer));
-
+  UcxBufferVec vec(*mr_, type_, std::move(buffers), mem_h_);
+  vec.backing_buffer_ = std::make_shared<UcxBuffer>(std::move(*this));
   return vec;
 }
 

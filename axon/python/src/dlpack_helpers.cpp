@@ -21,6 +21,8 @@ limitations under the License.
 #include <format>
 #include <nanobind/nanobind.h>
 
+#include <algorithm>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -130,6 +132,42 @@ ucx_memory_type_t DlDeviceToUcxMemoryType(DLDevice device) {
       return ucx_memory_type::UNKNOWN;
     default:
       return ucx_memory_type::UNKNOWN;
+  }
+}
+
+void ValidateTensorListEntry(
+  const DLTensor& tensor, DLDevice& list_device, bool first) {
+  if (first) {
+    list_device = tensor.device;
+  } else if (
+    tensor.device.device_type != list_device.device_type
+    || tensor.device.device_id != list_device.device_id) {
+    throw std::invalid_argument(
+      "Tensors in a list must share one device type and device ID");
+  }
+  if (!tensor.strides || tensor.ndim == 0) {
+    return;
+  }
+  const auto shape = std::span(tensor.shape, static_cast<size_t>(tensor.ndim));
+  if (std::ranges::find(shape, 0) != shape.end()) {
+    return;
+  }
+  // In storage order, each axis must start exactly after the preceding axes.
+  // Unit extents contribute no offsets and may have arbitrary strides.
+  std::vector<std::pair<int64_t, int64_t>> axes;
+  for (int dim = 0; dim < tensor.ndim; ++dim) {
+    if (shape[dim] > 1) axes.emplace_back(tensor.strides[dim], shape[dim]);
+  }
+  std::ranges::sort(axes);
+  int64_t stride = 1;
+  for (const auto& [actual_stride, extent] : axes) {
+    if (
+      actual_stride != stride
+      || stride > std::numeric_limits<int64_t>::max() / extent) {
+      throw std::invalid_argument(
+        "Each tensor in a list must occupy one contiguous memory range");
+    }
+    stride *= extent;
   }
 }
 
@@ -277,6 +315,9 @@ ucxx::UcxBuffer DlpackToUcxBuffer(
   }
 
   size_t required_size = rpc::utils::CalculateTensorSize(meta);
+  if (rpc::utils::CalculateTensorSize(dlm->dl_tensor) < required_size) {
+    throw std::invalid_argument("Tensor destination is too small");
+  }
   void* data_ptr =
     static_cast<char*>(dlm->dl_tensor.data) + dlm->dl_tensor.byte_offset;
   ucx_memory_type_t mem_type = DlDeviceToUcxMemoryType(dlm->dl_tensor.device);
@@ -318,19 +359,7 @@ ucxx::UcxBufferVec DlpackToUcxBufferVec(
       "Mismatch between dlpack list size and tensor_metas size");
   }
 
-  // Calculate sizes for each tensor
-  std::vector<size_t> sizes;
-  sizes.reserve(tensor_metas.size());
-  for (const auto& meta : tensor_metas) {
-    sizes.push_back(rpc::utils::CalculateTensorSize(meta));
-  }
-
-  // Determine memory type (assume all tensors have same device type)
-  ucx_memory_type_t mem_type = ucx_memory_type::HOST;
-  if (!tensor_metas.empty()) {
-    mem_type = DlDeviceToUcxMemoryType(tensor_metas[0].device);
-  }
-
+  DLDevice list_device{kDLCPU, 0};
   // Create ucx_buffer_t vector pointing directly to dlpack memory (no copy)
   std::vector<ucx_buffer_t> buffers;
   buffers.reserve(tensor_metas.size());
@@ -343,18 +372,23 @@ ucxx::UcxBufferVec DlpackToUcxBufferVec(
       throw std::runtime_error(
         "Failed to extract DLManagedTensor from dlpack object");
     }
+    ValidateTensorListEntry(dlm->dl_tensor, list_device, i == 0);
+    const auto size = rpc::utils::CalculateTensorSize(tensor_metas[i]);
+    if (rpc::utils::CalculateTensorSize(dlm->dl_tensor) < size) {
+      throw std::invalid_argument("Tensor list destination is too small");
+    }
     owners.emplace_back(std::move(owner));
     void* data_ptr =
       static_cast<char*>(dlm->dl_tensor.data) + dlm->dl_tensor.byte_offset;
     // Create ucx_buffer_t pointing directly to dlpack memory (no copy)
 
-    buffers.push_back({data_ptr, sizes[i]});
+    buffers.push_back({data_ptr, size});
   }
 
   // Create UcxBufferVec using external memory pointers with custom deleter
   // that holds the owners list.
   return ucxx::UcxBufferVec(
-    mr, mem_type, buffers, nullptr, true,
+    mr, DlDeviceToUcxMemoryType(list_device), buffers, nullptr, true,
     [owners = std::move(owners)](void*) {});
 }
 
@@ -371,6 +405,7 @@ ucxx::UcxBufferVec DlpackToUcxBufferVec(
       "Mismatch between dlpack list size and sizes size");
   }
 
+  DLDevice list_device{kDLCPU, 0};
   std::vector<ucx_buffer_t> buffers;
   buffers.reserve(sizes.size());
   std::vector<SharedPyObject> owners;
@@ -381,6 +416,14 @@ ucxx::UcxBufferVec DlpackToUcxBufferVec(
     if (!dlm) {
       throw std::runtime_error(
         "Failed to extract DLManagedTensor from dlpack object");
+    }
+    ValidateTensorListEntry(dlm->dl_tensor, list_device, i == 0);
+    if (DlDeviceToUcxMemoryType(list_device) != mem_type) {
+      throw std::invalid_argument(
+        "Tensor list device differs from its requested memory type");
+    }
+    if (rpc::utils::CalculateTensorSize(dlm->dl_tensor) < sizes[i]) {
+      throw std::invalid_argument("Tensor list destination is too small");
     }
     owners.emplace_back(std::move(owner));
     void* data_ptr =
@@ -418,7 +461,8 @@ nb::object TensorMetaToDlpack(
   dlm_tensor->dl_tensor.dtype = tensor->dtype;
   dlm_tensor->dl_tensor.shape = tensor->shape;
   dlm_tensor->dl_tensor.strides = tensor->strides;
-  dlm_tensor->dl_tensor.byte_offset = tensor->byte_offset;
+  // The receive buffer starts at the first transmitted element.
+  dlm_tensor->dl_tensor.byte_offset = 0;
   dlm_tensor->manager_ctx = new TensorDlpackContext(
     std::move(tensor), std::static_pointer_cast<void>(std::move(owned)));
   dlm_tensor->deleter = [](DLManagedTensor* self) {
@@ -440,42 +484,10 @@ nb::list TensorMetaVecToDlpack(
   }
   nb::list result;
 
-  if (buffer_vec.has_backing_buffer()) {
-    auto shared_buffer_vec =
-      std::make_shared<ucxx::UcxBufferVec>(std::move(buffer_vec));
-    ucx_memory_type_t mem_type = shared_buffer_vec->type();
-    DLDevice device = UcxMemoryTypeToDlDevice(mem_type);
-
-    for (size_t i = 0; i < meta_vec.size(); ++i) {
-      auto tensor = std::make_unique<axon::utils::TensorBase>();
-      tensor->assign(std::move(meta_vec[i]), (*shared_buffer_vec)[i].data);
-      tensor->device = device;
-
-      DLManagedTensor* dlm_tensor = new DLManagedTensor;
-      dlm_tensor->dl_tensor.data = tensor->data;
-      dlm_tensor->dl_tensor.device = device;
-      dlm_tensor->dl_tensor.ndim = tensor->ndim;
-      dlm_tensor->dl_tensor.dtype = tensor->dtype;
-      dlm_tensor->dl_tensor.shape = tensor->shape;
-      dlm_tensor->dl_tensor.strides = tensor->strides;
-      dlm_tensor->dl_tensor.byte_offset = tensor->byte_offset;
-      dlm_tensor->manager_ctx =
-        new TensorDlpackContext(std::move(tensor), shared_buffer_vec);
-      dlm_tensor->deleter = [](DLManagedTensor* self) {
-        delete static_cast<TensorDlpackContext*>(self->manager_ctx);
-        delete self;
-      };
-
-      nb::object capsule = nb::steal<nb::object>(
-        PyCapsule_New(dlm_tensor, "dltensor", SafeDlpackCapsuleDestructor));
-      result.append(nb::cast(DLPackCapsuleWrapper(std::move(capsule), device)));
-    }
-  } else {
-    auto bufs = std::move(buffer_vec).ExtractBuffers();
-    for (size_t i = 0; i < meta_vec.size(); ++i) {
-      result.append(
-        TensorMetaToDlpack(mr, std::move(meta_vec[i]), std::move(bufs[i])));
-    }
+  auto buffers = std::move(buffer_vec).ExtractBuffers();
+  for (size_t i = 0; i < meta_vec.size(); ++i) {
+    result.append(
+      TensorMetaToDlpack(mr, std::move(meta_vec[i]), std::move(buffers[i])));
   }
   return result;
 }
@@ -618,14 +630,7 @@ ucxx::UcxBuffer CreateUcxBufferFromPayload(
   }
   void* data_ptr =
     static_cast<char*>(dlm->dl_tensor.data) + dlm->dl_tensor.byte_offset;
-  // Calculate size from shape
-  size_t size = 1;
-  for (int i = 0; i < dlm->dl_tensor.ndim; ++i) {
-    size *= dlm->dl_tensor.shape[i];
-  }
-  // Calculate bytes from dtype
-  size_t dtype_bytes = (dlm->dl_tensor.dtype.bits + 7) / 8;
-  size *= dtype_bytes;
+  const auto size = rpc::utils::CalculateTensorSize(dlm->dl_tensor);
   ucx_memory_type_t mem_type = DlDeviceToUcxMemoryType(dlm->dl_tensor.device);
   // Create UcxBuffer with deleter keeping owner alive
   SharedPyObject owner_guard(std::move(owner));
@@ -645,11 +650,7 @@ ucxx::UcxBufferVec CreateUcxBufferVecFromPayload(
   nb::list py_list = nb::cast<nb::list>(payload_obj);
   size_t list_size = nb::len(py_list);
 
-  // Calculate sizes for each tensor from dlpack objects
-  std::vector<size_t> sizes;
-  sizes.reserve(list_size);
-  ucx_memory_type_t mem_type = ucx_memory_type::HOST;
-  bool mem_type_set = false;
+  DLDevice list_device{kDLCPU, 0};
 
   // Create ucx_buffer_t vector pointing directly to dlpack memory (no copy)
   std::vector<ucx_buffer_t> buffers;
@@ -665,20 +666,8 @@ ucxx::UcxBufferVec CreateUcxBufferVecFromPayload(
     }
     owners.emplace_back(std::move(owner));
 
-    // Calculate size from shape and dtype
-    size_t size = 1;
-    for (int j = 0; j < dlm->dl_tensor.ndim; ++j) {
-      size *= dlm->dl_tensor.shape[j];
-    }
-    size_t dtype_bytes = (dlm->dl_tensor.dtype.bits + 7) / 8;
-    size *= dtype_bytes;
-    sizes.push_back(size);
-
-    // Determine memory type from first tensor
-    if (!mem_type_set) {
-      mem_type = DlDeviceToUcxMemoryType(dlm->dl_tensor.device);
-      mem_type_set = true;
-    }
+    const auto size = rpc::utils::CalculateTensorSize(dlm->dl_tensor);
+    ValidateTensorListEntry(dlm->dl_tensor, list_device, i == 0);
 
     void* data_ptr =
       static_cast<char*>(dlm->dl_tensor.data) + dlm->dl_tensor.byte_offset;
@@ -688,7 +677,7 @@ ucxx::UcxBufferVec CreateUcxBufferVecFromPayload(
 
   // Create UcxBufferVec with deleter keeping owners alive
   return ucxx::UcxBufferVec(
-    mr, mem_type, buffers, nullptr, true,
+    mr, DlDeviceToUcxMemoryType(list_device), buffers, nullptr, true,
     [owners = std::move(owners)](void*) {});
 }
 
@@ -751,14 +740,7 @@ ucxx::UcxBufferVec DlpackToUcxBufferVecFromDlm(
       "tensor_metas");
   }
 
-  if (dlms.empty()) {
-    return ucxx::UcxBufferVec(mr, ucx_memory_type::HOST, std::vector<size_t>{});
-  }
-
-  // Determine memory type from first tensor
-  ucx_memory_type_t mem_type =
-    DlDeviceToUcxMemoryType(dlms[0]->dl_tensor.device);
-
+  DLDevice list_device{kDLCPU, 0};
   std::vector<ucx_buffer_t> buffers;
   buffers.reserve(dlms.size());
   std::vector<SharedPyObject> owner_guards;
@@ -772,6 +754,7 @@ ucxx::UcxBufferVec DlpackToUcxBufferVecFromDlm(
         + std::to_string(i));
     }
 
+    ValidateTensorListEntry(dlms[i]->dl_tensor, list_device, i == 0);
     size_t size = rpc::utils::CalculateTensorSize(tensor_metas[i]);
     void* data_ptr = static_cast<char*>(dlms[i]->dl_tensor.data)
                      + dlms[i]->dl_tensor.byte_offset;
@@ -781,7 +764,7 @@ ucxx::UcxBufferVec DlpackToUcxBufferVecFromDlm(
   }
 
   return ucxx::UcxBufferVec(
-    mr, mem_type, buffers, nullptr, true,
+    mr, DlDeviceToUcxMemoryType(list_device), buffers, nullptr, true,
     [owner_guards = std::move(owner_guards)](void*) {});
 }
 

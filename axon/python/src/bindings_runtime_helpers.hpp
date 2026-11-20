@@ -358,6 +358,7 @@ struct __attribute__((visibility("hidden"))) InvokeContext {
   std::vector<DLManagedTensor*> dlm_ptrs;  // Cached DLManagedTensor pointers
   std::vector<nb::object> dlm_owners;      // Cached owners for lifetime
   rpc::RpcRequestHeader& header;
+  bool has_tensor_list = false;
 
   explicit InvokeContext(rpc::RpcRequestHeader& h) : header(h) {
     // Reserve for typical case (1-4 tensors)
@@ -382,6 +383,13 @@ struct __attribute__((visibility("hidden"))) InvokeContext {
 
   void add_non_tensor(nb::object obj) { header.AddParam(InferParamMeta(obj)); }
 
+  void add_tensor_list(nb::sequence tensors) {
+    has_tensor_list = true;
+    for (nb::handle tensor : tensors) {
+      add_tensor(nb::borrow<nb::object>(tensor));
+    }
+  }
+
   /*
    * Handle a List[List[Tensor]] function argument.
    *
@@ -405,6 +413,7 @@ struct __attribute__((visibility("hidden"))) InvokeContext {
    */
   void add_nested_tensor_list(nb::object obj) {
     namespace data = cista::offset;
+    has_tensor_list = true;
     nb::sequence outer = nb::cast<nb::sequence>(obj);
     size_t group_count = nb::len(outer);
 
@@ -435,12 +444,12 @@ struct __attribute__((visibility("hidden"))) InvokeContext {
   // Finalize header by adding tensor meta(s) at the end.
   // This enables GetTensorMetas to find them quickly via reverse iteration.
   void finalize_header() {
-    if (tensor_metas.size() == 1) {
+    if (payload_type() == rpc::PayloadType::UCX_BUFFER) {
       rpc::ParamMeta meta_param;
       meta_param.type = rpc::ParamType::TENSOR_META;
       meta_param.value.emplace<rpc::utils::TensorMeta>(tensor_metas[0]);
       header.AddParam(std::move(meta_param));
-    } else if (tensor_metas.size() > 1) {
+    } else if (payload_type() == rpc::PayloadType::UCX_BUFFER_VEC) {
       rpc::ParamMeta meta_param;
       meta_param.type = rpc::ParamType::TENSOR_META_VEC;
       rpc::TensorMetaVec meta_vec;
@@ -453,8 +462,12 @@ struct __attribute__((visibility("hidden"))) InvokeContext {
     }
   }
 
-  [[nodiscard]] size_t tensor_count() const noexcept {
-    return tensor_objs.size();
+  [[nodiscard]] rpc::PayloadType payload_type() const noexcept {
+    if (has_tensor_list || dlm_ptrs.size() > 1) {
+      return rpc::PayloadType::UCX_BUFFER_VEC;
+    }
+    return dlm_ptrs.empty() ? rpc::PayloadType::NO_PAYLOAD
+                            : rpc::PayloadType::UCX_BUFFER;
   }
 
   // Create UcxBuffer from cached data (no repeated ExtractDlpackTensor call)
@@ -472,7 +485,9 @@ struct __attribute__((visibility("hidden"))) InvokeContext {
   // calls)
   [[nodiscard]] ucxx::UcxBufferVec to_ucx_buffer_vec(
     ucxx::UcxMemoryResourceManager& mr) {
-    return DlpackToUcxBufferVecFromDlm(dlm_ptrs, dlm_owners, tensor_metas, mr);
+    // finalize_header moved the shape and strides into the wire metadata.
+    return DlpackToUcxBufferVecFromDlm(
+      dlm_ptrs, dlm_owners, axon::utils::GetTensorMetas(header.params), mr);
   }
 
   // Convert tensor_objs to nb::list for DlpackToUcxBufferVec

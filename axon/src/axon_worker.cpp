@@ -62,6 +62,58 @@ limitations under the License.
 namespace eux {
 namespace axon {
 
+ucxx::UcxBufferVec detail::PlaceEagerTensorList(
+  ucxx::UcxMemoryResourceManager& mr, ucxx::UcxBuffer payload,
+  utils::TensorMetaSpan metas, std::optional<ucxx::UcxBufferVec> destination) {
+  std::vector<size_t> sizes;
+  sizes.reserve(metas.size());
+  size_t remaining = payload.size();
+  bool needs_copy = payload.has_release_callback();
+  for (const auto& meta : metas) {
+    const auto size = rpc::utils::CalculateTensorSize(meta);
+    if (size > remaining) {
+      throw std::length_error("Tensor list exceeds the received payload");
+    }
+    const auto address = reinterpret_cast<uintptr_t>(payload.data())
+                         + (payload.size() - remaining);
+    // Preserve the alignment available from an independently allocated buffer.
+    if (size && address % alignof(uint64_t) != 0) {
+      needs_copy = true;
+    }
+    sizes.push_back(size);
+    remaining -= size;
+  }
+  if (remaining != 0) {
+    throw std::length_error("Tensor list does not cover the received payload");
+  }
+  if (!destination && !needs_copy) {
+    return std::move(payload).to_buffer_vec(sizes);
+  }
+  if (!destination) {
+    destination.emplace(mr, ucx_memory_type::HOST, sizes);
+  }
+  if (destination->size() != sizes.size()) {
+    throw std::invalid_argument(
+      "Memory policy returned the wrong tensor count");
+  }
+  for (size_t i = 0; i < sizes.size(); ++i) {
+    const auto& segment = (*destination)[i];
+    if (segment.size != sizes[i] || (segment.size && !segment.data)) {
+      throw std::invalid_argument(
+        "Memory policy returned an incompatible tensor buffer");
+    }
+  }
+  const auto* src = static_cast<const std::byte*>(payload.data());
+  for (const auto& segment : *destination) {
+    if (segment.size) {
+      mr.memcpy(
+        destination->type(), segment.data, payload.type(), src, segment.size);
+      src += segment.size;
+    }
+  }
+  return std::move(*destination);
+}
+
 AxonWorker::AxonWorker(
   std::reference_wrapper<ucxx::UcxMemoryResourceManager> mr,
   const std::string& worker_name, size_t thread_pool_size,
@@ -1160,8 +1212,8 @@ auto ProcessRndvBufferImpl_(
     std::is_same_v<MemPolicyT, AlwaysOnHostPolicy>;
   // In the RNDV path, when RespBufferT = rpc::PayloadVariant, the code will
   // select and call ProcessRndvBuffer_<ucxx::UcxBuffer> or
-  // ProcessRndvBuffer_<ucxx::UcxBufferVec> based tensor_metas.size(). However,
-  // MemPolicyT remains CustomMemoryPolicy<rpc::PayloadVariant>.
+  // ProcessRndvBuffer_<ucxx::UcxBufferVec> based on the tensor metadata tag.
+  // However, MemPolicyT remains CustomMemoryPolicy<rpc::PayloadVariant>.
   constexpr const bool IsCustomMemory =
     std::is_same_v<MemPolicyT, CustomMemoryPolicy<ReceivedBufferT>>
     || std::is_same_v<MemPolicyT, CustomMemoryPolicy<rpc::PayloadVariant>>;
@@ -1180,10 +1232,15 @@ auto ProcessRndvBufferImpl_(
           using ArgT = std::decay_t<decltype(arg)>;
           if constexpr (std::is_same_v<ArgT, ReceivedBufferT>) {
             return buffer_receiver_fn(std::forward<decltype(arg)>(arg));
-          } else {
-            throw std::runtime_error(
-              "Memory policy returned incompatible buffer type");
+          } else if constexpr (
+            std::is_same_v<ReceivedBufferT, ucxx::UcxBufferVec>
+            && std::is_same_v<ArgT, ucxx::UcxBuffer>) {
+            if (tensor_metas.size() == 1) {
+              return buffer_receiver_fn(ReceivedBufferT(std::move(arg)));
+            }
           }
+          throw std::runtime_error(
+            "Memory policy returned incompatible buffer type");
         },
         std::move(payload_buffer));
     } else {

@@ -583,8 +583,8 @@ void RunServerIov(
                size_t length,
                const ucp_am_recv_param_t* param) -> ucs_status_t {
     auto* a = static_cast<ucx_am_recv_iov_callback_arg*>(arg);
-    // For IOV path we always force RNDV in send
-    EXPECT_TRUE((param->recv_attr & UCP_AM_RECV_ATTR_FLAG_RNDV));
+    const bool rndv = param->recv_attr & UCP_AM_RECV_ATTR_FLAG_RNDV;
+    EXPECT_EQ(rndv, length >= RNDV_THRESHOLD);
     // Verify header {1,2,3,4}
     EXPECT_EQ(header_length, 4u);
     if (header_length == 4u) {
@@ -594,10 +594,18 @@ void RunServerIov(
       EXPECT_EQ(h[2], 3);
       EXPECT_EQ(h[3], 4);
     }
-    a->data_desc = std::make_unique<UcxAmDesc>(
-      const_cast<void*>(header), header_length, data, length, 0,
-      static_cast<ucp_am_recv_attr_t>(param->recv_attr));
     a->recv_called = true;
+    if (!rndv) {
+      std::vector<uint8_t> bytes(length);
+      if (length != 0) {
+        std::memcpy(bytes.data(), data, length);
+      }
+      a->received_data.set_value(std::move(bytes));
+      return UCS_OK;
+    }
+    a->data_desc = std::make_unique<UcxAmDesc>(
+      nullptr, 0, data, length, 0,
+      static_cast<ucp_am_recv_attr_t>(param->recv_attr));
     return UCS_INPROGRESS;
   };
   param.arg = &arg;
@@ -629,57 +637,34 @@ void RunServerIov(
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
 
-  // Use expected lengths provided by test
-  ASSERT_TRUE(arg.data_desc != nullptr);
-  // arg.data_desc->data_length is total data length
-  const size_t iov_count = expected_lengths.size();
-
-  // Prepare receive IOVs
-  std::vector<std::vector<uint8_t>> recv_segs(iov_count);
-  std::vector<ucp_dt_iov_t> recv_iov(iov_count);
-  for (size_t i = 0; i < iov_count; ++i) {
-    recv_segs[i].resize(expected_lengths[i]);
-    recv_iov[i].buffer = recv_segs[i].data();
-    recv_iov[i].length = recv_segs[i].size();
-  }
-
-  // Receive via NBX IOV
-  std::atomic<bool> recv_nbx_called{false};
-  class recv_am_iov_callback : public UcxCallback {
-   public:
-    explicit recv_am_iov_callback(std::atomic<bool>& flag) : flag_(flag) {}
-    void operator()(ucs_status_t status) override {
+  if (arg.data_desc) {
+    const size_t iov_count = expected_lengths.size();
+    std::vector<std::vector<uint8_t>> recv_segs(iov_count);
+    std::vector<ucp_dt_iov_t> recv_iov(iov_count);
+    for (size_t i = 0; i < iov_count; ++i) {
+      recv_segs[i].resize(expected_lengths[i]);
+      recv_iov[i] = {recv_segs[i].data(), recv_segs[i].size()};
+    }
+    bool recv_done = false;
+    MockCallback cb([&](ucs_status_t status) {
       EXPECT_EQ(status, UCS_OK);
-      flag_ = true;
+      recv_done = true;
+    });
+    auto [recv_status, recv_req] = conn->recv_am_iov_data(
+      recv_iov.data(), recv_iov.size(), nullptr, std::move(*arg.data_desc),
+      UCS_MEMORY_TYPE_UNKNOWN, &cb);
+    ASSERT_EQ(recv_status, UCS_OK);
+    while (!recv_done) {
+      ucp_worker_progress(ucp_worker);
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-   private:
-    std::atomic<bool>& flag_;
-  };
-
-  recv_am_iov_callback cb{recv_nbx_called};
-  auto [recv_status, recv_req] = conn->recv_am_iov_data(
-    recv_iov.data(), recv_iov.size(), nullptr, std::move(*arg.data_desc),
-    UCS_MEMORY_TYPE_HOST, &cb);
-  ASSERT_EQ(recv_status, UCS_OK);
-  ASSERT_TRUE(
-    recv_req == nullptr || recv_req->status == UCS_INPROGRESS
-    || recv_req->status == UCS_OK);
-
-  while (!recv_nbx_called) {
-    ucp_worker_progress(ucp_worker);
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    std::vector<uint8_t> flat;
+    for (const auto& segment : recv_segs) {
+      flat.insert(flat.end(), segment.begin(), segment.end());
+    }
+    received_data.set_value(std::move(flat));
   }
-
-  // Flatten to a single vector for assertion convenience
-  size_t total = 0;
-  for (size_t i = 0; i < iov_count; ++i) total += recv_segs[i].size();
-  std::vector<uint8_t> flat;
-  flat.reserve(total);
-  for (size_t i = 0; i < iov_count; ++i) {
-    flat.insert(flat.end(), recv_segs[i].begin(), recv_segs[i].end());
-  }
-  received_data.set_value(std::move(flat));
 
   // Wait for test completion
   test_complete.wait();
@@ -733,7 +718,7 @@ void RunClientIov(
 
   auto [status_send, request] = conn->send_am_iov_data(
     header_bytes.data(), header_bytes.size(), iov.data(), iov.size(), nullptr,
-    UCS_MEMORY_TYPE_HOST, send_callback.get());
+    UCS_MEMORY_TYPE_UNKNOWN, send_callback.get());
   ASSERT_EQ(status_send, UCS_OK);
   ASSERT_TRUE(
     request == nullptr || request->status == UCS_INPROGRESS
@@ -783,7 +768,7 @@ void RunServerIovRecvContig(
                size_t length,
                const ucp_am_recv_param_t* param) -> ucs_status_t {
     auto* a = static_cast<ucx_am_recv_iov_to_contig_callback_arg*>(arg);
-    // For IOV path we always force RNDV in send
+    // This fixture sends a payload above the configured rendezvous threshold.
     EXPECT_TRUE((param->recv_attr & UCP_AM_RECV_ATTR_FLAG_RNDV));
     // Verify header {1,2,3,4}
     EXPECT_EQ(header_length, 4u);
@@ -926,7 +911,7 @@ TEST_F(UcxConnectionTest, SendRecvAmLargeData) {
 
 // ============================ IOV tests ============================
 
-TEST_F(UcxConnectionTest, SendRecvAmIovSmallData) {
+void VerifyIovTransfer(const std::vector<size_t>& lengths) {
   unsigned int seed = static_cast<unsigned int>(time(nullptr));
   int port =
     10000 + (rand_r(&seed) % 55535);  // Random port between 10000-65535
@@ -938,11 +923,10 @@ TEST_F(UcxConnectionTest, SendRecvAmIovSmallData) {
   auto test_complete = test_complete_promise.get_future().share();
   std::promise<std::vector<uint8_t>> received_data;
 
-  // Prepare small IOV segments
   std::vector<std::vector<uint8_t>> segs;
-  segs.emplace_back(256);
-  segs.emplace_back(512);
-  segs.emplace_back(300);
+  for (auto length : lengths) {
+    segs.emplace_back(length);
+  }
   // Fill pattern
   size_t cursor = 0;
   for (auto& s : segs) {
@@ -952,13 +936,9 @@ TEST_F(UcxConnectionTest, SendRecvAmIovSmallData) {
 
   // Expected flat
   std::vector<uint8_t> expected;
-  expected.reserve(256 + 512 + 300);
   for (auto& s : segs) expected.insert(expected.end(), s.begin(), s.end());
 
   // Start server
-  std::vector<size_t> lengths;
-  lengths.reserve(segs.size());
-  for (auto& s : segs) lengths.push_back(s.size());
   std::thread server_thread(
     RunServerIov, port, std::ref(server_ready), std::ref(received_data),
     std::ref(test_complete), std::ref(lengths));
@@ -977,10 +957,7 @@ TEST_F(UcxConnectionTest, SendRecvAmIovSmallData) {
   // Wait receive done
   auto received = received_data.get_future().get();
 
-  ASSERT_EQ(received.size(), expected.size());
-  for (size_t i = 0; i < expected.size(); ++i) {
-    ASSERT_EQ(received[i], expected[i]);
-  }
+  EXPECT_EQ(received, expected);
 
   // Signal finish
   test_complete_promise.set_value();
@@ -989,59 +966,18 @@ TEST_F(UcxConnectionTest, SendRecvAmIovSmallData) {
   client_thread.join();
 }
 
+TEST_F(UcxConnectionTest, SendRecvAmIovSmallData) {
+  VerifyIovTransfer({0, 256, 0, 512, 300, 0});
+}
+
 TEST_F(UcxConnectionTest, SendRecvAmIovLargeData) {
-  unsigned int seed = static_cast<unsigned int>(time(nullptr));
-  int port =
-    10000 + (rand_r(&seed) % 55535);  // Random port between 10000-65535
-  while (!isPortAvailable(port)) {
-    port = 10000 + (rand_r(&seed) % 55535);
-  }
-  std::promise<bool> server_ready, client_ready;
-  std::promise<void> test_complete_promise;
-  auto test_complete = test_complete_promise.get_future().share();
-  std::promise<std::vector<uint8_t>> received_data;
+  VerifyIovTransfer({0, 512 * 1024, 0, 256 * 1024, 800 * 1024, 0});
+}
 
-  // Prepare large IOV segments (total ~1.5MB)
-  std::vector<std::vector<uint8_t>> segs;
-  segs.emplace_back(512 * 1024);
-  segs.emplace_back(256 * 1024);
-  segs.emplace_back(800 * 1024);
-  size_t cursor = 0;
-  for (auto& s : segs) {
-    for (size_t i = 0; i < s.size(); ++i, ++cursor)
-      s[i] = static_cast<uint8_t>(cursor % 256);
-  }
-
-  std::vector<uint8_t> expected;
-  expected.reserve(512 * 1024 + 256 * 1024 + 800 * 1024);
-  for (auto& s : segs) expected.insert(expected.end(), s.begin(), s.end());
-
-  std::vector<size_t> lengths2;
-  lengths2.reserve(segs.size());
-  for (auto& s : segs) lengths2.push_back(s.size());
-  std::thread server_thread(
-    RunServerIov, port, std::ref(server_ready), std::ref(received_data),
-    std::ref(test_complete), std::ref(lengths2));
-
-  server_ready.get_future().wait();
-
-  std::thread client_thread(
-    RunClientIov, port, std::cref(segs), std::ref(client_ready),
-    std::ref(test_complete));
-
-  client_ready.get_future().wait();
-
-  auto received = received_data.get_future().get();
-
-  ASSERT_EQ(received.size(), expected.size());
-  for (size_t i = 0; i < expected.size(); ++i) {
-    ASSERT_EQ(received[i], expected[i]);
-  }
-
-  test_complete_promise.set_value();
-
-  server_thread.join();
-  client_thread.join();
+TEST_F(UcxConnectionTest, SendRecvAmIovEmptyData) {
+  setenv("UCX_RNDV_THRESH", "0", 1);
+  VerifyIovTransfer({});
+  VerifyIovTransfer({0, 0});
 }
 
 TEST_F(UcxConnectionTest, SendIovRecvAmLargeData) {

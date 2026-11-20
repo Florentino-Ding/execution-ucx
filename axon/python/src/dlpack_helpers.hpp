@@ -176,6 +176,12 @@ DLDevice UcxMemoryTypeToDlDevice(ucx_memory_type_t mem_type);
 // Helper to convert DLDevice to ucx_memory_type_t
 ucx_memory_type_t DlDeviceToUcxMemoryType(DLDevice device);
 
+// Each tensor is one contiguous IOV entry; all entries share a UCX memory type
+// and device. Dense transposes are valid because their strides travel in the
+// header.
+void ValidateTensorListEntry(
+  const DLTensor& tensor, DLDevice& list_device, bool first);
+
 std::pair<DLManagedTensor*, nb::object> ExtractDlpackTensor(
   nb::object py_dlpack);
 

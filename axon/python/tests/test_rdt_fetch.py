@@ -127,6 +127,24 @@ async def test_async_fetch_preallocated_torch_batch_with_empty_tensor(empty_firs
 
 
 @pytest.mark.asyncio
+async def test_small_tensor_list_uses_policy_destinations(monkeypatch):
+    monkeypatch.setenv("UCX_RNDV_THRESH", "1M")
+    expected = [np.arange(5, dtype=np.int32), np.array(19, dtype=np.int64)]
+    destinations = [np.empty_like(tensor) for tensor in expected]
+
+    async def fetch(object_id: str) -> List[np.ndarray]:
+        return expected
+
+    async with _connected(fetch) as client:
+        result = await _finish(_launch(client, memory_policy=lambda _: destinations))
+        for received, destination, tensor in zip(
+            result, destinations, expected, strict=True
+        ):
+            assert received is destination
+            np.testing.assert_array_equal(received, tensor)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("count", [0, 1, 4])
 async def test_async_fetch_returns_all_tensors_in_one_rpc(count):
     entered = asyncio.Event()
@@ -379,7 +397,6 @@ async def test_async_fetch_rejects_inactive_client_with_live_loop(state):
 async def test_async_fetch_retains_runtime_until_native_completion():
     entered = asyncio.Event()
     release = asyncio.Event()
-    # Match the large-response tests: small eager replies bypass memory_policy.
     expected = np.arange(1024 * 1024, dtype=np.int32)
     destination = np.empty_like(expected)
 

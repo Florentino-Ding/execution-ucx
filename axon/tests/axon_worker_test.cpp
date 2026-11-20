@@ -88,6 +88,43 @@ class AxonWorkerIntegrationTest : public ::testing::Test {
   std::unique_ptr<ucxx::DefaultUcxMemoryResourceManager> mr_;
 };
 
+TEST(AxonEagerListTest, UnalignedTensorGetsAlignedStorage) {
+  ucxx::DefaultUcxMemoryResourceManager mr;
+  const uint64_t value = 0x1020304050607080;
+  ucxx::UcxBuffer payload(mr, ucx_memory_type::HOST, 1 + sizeof(value));
+  auto* bytes = static_cast<std::byte*>(payload.data());
+  bytes[0] = std::byte{3};
+  std::memcpy(bytes + 1, &value, sizeof(value));
+
+  TensorMeta metas[2]{};
+  metas[0].dtype = {kDLUInt, 8, 1};
+  metas[1].dtype = {kDLUInt, 32, 2};
+  auto buffers =
+    detail::PlaceEagerTensorList(mr, std::move(payload), metas, std::nullopt);
+  ASSERT_EQ(buffers.size(), 2);
+  ASSERT_EQ(
+    reinterpret_cast<uintptr_t>(buffers[1].data) % alignof(uint64_t), 0);
+  EXPECT_EQ(*static_cast<uint64_t*>(buffers[1].data), value);
+}
+
+TEST(AxonEagerListTest, ReleasesUcxStorageBeforeReturningTensorViews) {
+  ucxx::DefaultUcxMemoryResourceManager mr;
+  uint64_t source = 17;
+  bool released = false;
+  ucxx::UcxBuffer payload(
+    mr, ucx_memory_type::HOST, &source, sizeof(source), nullptr, true,
+    [&](void*) {
+      source = 0;
+      released = true;
+    });
+  TensorMeta meta{};
+  meta.dtype = {kDLUInt, 64, 1};
+  auto buffers = detail::PlaceEagerTensorList(
+    mr, std::move(payload), {&meta, 1}, std::nullopt);
+  EXPECT_TRUE(released);
+  EXPECT_EQ(*static_cast<uint64_t*>(buffers[0].data), 17);
+}
+
 TEST_F(AxonWorkerIntegrationTest, ClientServerInteraction) {
   int pipe_fd[2];
   ASSERT_EQ(pipe(pipe_fd), 0);

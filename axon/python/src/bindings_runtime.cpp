@@ -572,12 +572,16 @@ void RegisterRuntime(nb::module_& m) {
       std::vector<size_t> tensor_param_indices;
       std::vector<size_t> tensor_return_indices;
       for (size_t i = 0; i < param_types.size(); ++i) {
-        if (param_types[i] == rpc::ParamType::TENSOR_META) {
+        if (
+          param_types[i] == rpc::ParamType::TENSOR_META
+          || param_types[i] == rpc::ParamType::TENSOR_META_VEC) {
           tensor_param_indices.push_back(i);
         }
       }
       for (size_t i = 0; i < return_types.size(); ++i) {
-        if (return_types[i] == rpc::ParamType::TENSOR_META) {
+        if (
+          return_types[i] == rpc::ParamType::TENSOR_META
+          || return_types[i] == rpc::ParamType::TENSOR_META_VEC) {
           tensor_return_indices.push_back(i);
         }
       }
@@ -587,13 +591,19 @@ void RegisterRuntime(nb::module_& m) {
       rpc::PayloadType actual_return_payload = return_payload_type;
 
       if (tensor_param_indices.size() == 1) {
-        actual_input_payload = rpc::PayloadType::UCX_BUFFER;
+        actual_input_payload = param_types[tensor_param_indices[0]]
+                                   == rpc::ParamType::TENSOR_META_VEC
+                                 ? rpc::PayloadType::UCX_BUFFER_VEC
+                                 : rpc::PayloadType::UCX_BUFFER;
       } else if (tensor_param_indices.size() > 1) {
         actual_input_payload = rpc::PayloadType::UCX_BUFFER_VEC;
       }
 
       if (tensor_return_indices.size() == 1) {
-        actual_return_payload = rpc::PayloadType::UCX_BUFFER;
+        actual_return_payload = return_types[tensor_return_indices[0]]
+                                    == rpc::ParamType::TENSOR_META_VEC
+                                  ? rpc::PayloadType::UCX_BUFFER_VEC
+                                  : rpc::PayloadType::UCX_BUFFER;
       } else if (tensor_return_indices.size() > 1) {
         actual_return_payload = rpc::PayloadType::UCX_BUFFER_VEC;
       }
@@ -604,13 +614,11 @@ void RegisterRuntime(nb::module_& m) {
       cista::offset::vector<rpc::ParamType> cista_return_types;
       cista_return_types.set(return_types.begin(), return_types.end());
 
-      // Validate: if memory_policy is set, from_dlpack_fn must also be set
-      // for tensor parameters. This is because custom_memory_policy only works
-      // in rendezvous path; eager path requires from_dlpack_fn to convert
-      // received data to Python tensors.
+      // Single-buffer eager receives use from_dlpack_fn to convert host data.
       if (
-        !memory_policy_factory.is_none() && !tensor_param_indices.empty()
-        && from_dlpack_fn.is_none()) {
+        !memory_policy_factory.is_none()
+        && actual_input_payload == rpc::PayloadType::UCX_BUFFER
+        && !tensor_param_indices.empty() && from_dlpack_fn.is_none()) {
         throw std::runtime_error(std::format(
           "Function '{}' has tensor parameters and custom memory_policy is "
           "set, but from_dlpack_fn is not provided. "
@@ -896,12 +904,10 @@ void RegisterRuntime(nb::module_& m) {
       cista::offset::vector<rpc::ParamType> cista_return_types;
       cista_return_types.set(return_types.begin(), return_types.end());
 
-      // Validate: if memory_policy is set, from_dlpack_fn must also be set
-      // for tensor parameters. This is because custom_memory_policy only works
-      // in rendezvous path; eager path requires from_dlpack_fn to convert
-      // received data to Python tensors.
+      // Single-buffer eager receives use from_dlpack_fn to convert host data.
       if (
         !memory_policy_factory.is_none()
+        && input_payload_type == rpc::PayloadType::UCX_BUFFER
         && !sig_info.tensor_param_indices.empty() && from_dlpack_fn.is_none()) {
         throw std::runtime_error(std::format(
           "Function '{}' has tensor parameters and custom memory_policy is "
@@ -1099,12 +1105,9 @@ void RegisterRuntime(nb::module_& m) {
           case python::ArgKind::SingleTensor:
             ctx.add_tensor(std::move(obj));
             break;
-          case python::ArgKind::FlatTensorList: {
-            nb::sequence seq = nb::cast<nb::sequence>(obj);
-            for (size_t ti = 0; ti < nb::len(seq); ++ti)
-              ctx.add_tensor(nb::cast<nb::object>(seq[ti]));
+          case python::ArgKind::FlatTensorList:
+            ctx.add_tensor_list(nb::cast<nb::sequence>(obj));
             break;
-          }
           case python::ArgKind::NestedTensorList:
             ctx.add_nested_tensor_list(std::move(obj));
             break;
@@ -1124,7 +1127,7 @@ void RegisterRuntime(nb::module_& m) {
         python::GetPythonWakeManager(), std::move(from_dlpack_fn));
 
       // Dispatch based on tensor count
-      if (ctx.tensor_count() == 0) {
+      if (ctx.payload_type() == rpc::PayloadType::NO_PAYLOAD) {
         if (use_custom_memory) {
           self.SpawnClientTask(python::InvokeRpcWithCustomMemory(
             self, worker_name, std::move(request_header), std::monostate{},
@@ -1134,7 +1137,7 @@ void RegisterRuntime(nb::module_& m) {
             self, worker_name, std::move(request_header), std::monostate{},
             std::move(result_handler)));
         }
-      } else if (ctx.tensor_count() == 1) {
+      } else if (ctx.payload_type() == rpc::PayloadType::UCX_BUFFER) {
         ucxx::UcxBuffer buffer =
           ctx.to_ucx_buffer(self.GetMemoryResourceManager().get());
         if (use_custom_memory) {
@@ -1209,12 +1212,9 @@ void RegisterRuntime(nb::module_& m) {
           case python::ArgKind::SingleTensor:
             ctx.add_tensor(std::move(obj));
             break;
-          case python::ArgKind::FlatTensorList: {
-            nb::sequence seq = nb::cast<nb::sequence>(obj);
-            for (size_t ti = 0; ti < nb::len(seq); ++ti)
-              ctx.add_tensor(nb::cast<nb::object>(seq[ti]));
+          case python::ArgKind::FlatTensorList:
+            ctx.add_tensor_list(nb::cast<nb::sequence>(obj));
             break;
-          }
           case python::ArgKind::NestedTensorList:
             ctx.add_nested_tensor_list(std::move(obj));
             break;
@@ -1234,7 +1234,7 @@ void RegisterRuntime(nb::module_& m) {
         std::move(from_dlpack_fn));
 
       // Dispatch based on tensor count
-      if (ctx.tensor_count() == 0) {
+      if (ctx.payload_type() == rpc::PayloadType::NO_PAYLOAD) {
         if (use_custom_memory) {
           self.SpawnClientTask(python::InvokeRpcWithCustomMemory(
             self, worker_name, std::move(request_header), std::monostate{},
@@ -1244,7 +1244,7 @@ void RegisterRuntime(nb::module_& m) {
             self, worker_name, std::move(request_header), std::monostate{},
             std::move(result_handler)));
         }
-      } else if (ctx.tensor_count() == 1) {
+      } else if (ctx.payload_type() == rpc::PayloadType::UCX_BUFFER) {
         ucxx::UcxBuffer buffer =
           ctx.to_ucx_buffer(self.GetMemoryResourceManager().get());
         if (use_custom_memory) {

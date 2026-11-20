@@ -133,7 +133,7 @@ class UcxMemoryResourceManager {
     std::array<
       std::function<void*(void*, const void*, size_t)>, UCX_MEMORY_TYPE_COUNT>,
     UCX_MEMORY_TYPE_COUNT>
-    memcpy_fns_;  // [src_type][dest_type]
+    memcpy_fns_;  // [dest_type][src_type]
 };
 
 /**
@@ -148,8 +148,8 @@ class DefaultUcxMemoryResourceManager : public UcxMemoryResourceManager {
   /**
    * @brief Constructor initializes default memory resources and copy functions
    *
-   * Sets up default memory resources and standard memory copy functions
-   * for all memory type combinations.
+   * Sets up host copies and, in CUDA builds, copies from host to device
+   * memory. Other copy directions require a registered function.
    */
   DefaultUcxMemoryResourceManager();
   ~DefaultUcxMemoryResourceManager() = default;

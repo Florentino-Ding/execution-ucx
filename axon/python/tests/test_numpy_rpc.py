@@ -159,6 +159,88 @@ async def test_list_func():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("threshold", ["1M", "1"])
+@pytest.mark.parametrize("count", [0, 1, 3])
+async def test_tensor_list_round_trip(monkeypatch, threshold, count):
+    monkeypatch.setenv("UCX_RNDV_THRESH", threshold)
+    tensors = [
+        np.arange(3, dtype=np.uint8),
+        np.array(23, dtype=np.float64),
+        np.empty((0, 3), dtype=np.int16),
+    ][:count]
+
+    async def reverse_tensors(values: List[np.ndarray]) -> List[np.ndarray]:
+        return [value.copy() for value in reversed(values)]
+
+    context = RpcTestContext()
+    async with context as client:
+        context.server.register_function(
+            reverse_tensors, 22, from_dlpack_fn=np.from_dlpack
+        )
+        result = await client.invoke(
+            tensors,
+            worker_name="test_worker",
+            session_id=0,
+            function=22,
+            from_dlpack_fn=np.from_dlpack,
+        )
+        assert isinstance(result, list)
+        assert len(result) == count
+        for value, expected in zip(result, reversed(tensors)):
+            assert value.dtype == expected.dtype
+            np.testing.assert_array_equal(value, expected)
+        del result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("threshold", ["1M", "1"])
+async def test_tensor_list_request_uses_policy_destinations(monkeypatch, threshold):
+    monkeypatch.setenv("UCX_RNDV_THRESH", threshold)
+    tensors = [np.arange(5, dtype=np.int16), np.array(23, dtype=np.float64)]
+    destinations = [np.empty_like(tensor) for tensor in tensors]
+
+    async def check_request(values: List[np.ndarray]) -> bool:
+        return all(
+            received is destination and np.array_equal(received, expected)
+            for received, destination, expected in zip(
+                values, destinations, tensors, strict=True
+            )
+        )
+
+    context = RpcTestContext()
+    async with context as client:
+        context.server.register_function(
+            check_request, 23, memory_policy=lambda _: destinations
+        )
+        assert await client.invoke(
+            tensors, worker_name="test_worker", session_id=0, function=23
+        )
+
+
+@pytest.mark.asyncio
+async def test_tensor_list_strided_storage():
+    async def echo(values: List[np.ndarray]) -> List[np.ndarray]:
+        return [value.copy(order="K") for value in values]
+
+    values = np.arange(12, dtype=np.int64).reshape(3, 4)
+    context = RpcTestContext()
+    async with context as client:
+        context.server.register_function(echo, 23, from_dlpack_fn=np.from_dlpack)
+        options = dict(
+            worker_name="test_worker",
+            session_id=0,
+            function=23,
+            from_dlpack_fn=np.from_dlpack,
+        )
+        (received,) = await client.invoke([values.T], **options)
+        np.testing.assert_array_equal(received, values.T)
+        assert received.strides == values.T.strides
+        del received
+        with pytest.raises(ValueError, match="contiguous memory range"):
+            await client.invoke([values[:, ::2]], **options)
+
+
+@pytest.mark.asyncio
 async def test_tuple_func():
     """Test Tuple[int, Tensor, Tensor] return with automatic from_dlpack conversion."""
     async with RpcTestContext() as client:

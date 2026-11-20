@@ -1835,8 +1835,8 @@ class ucx_am_context::recv_buffer_sender_t {
         buffer_own_.size() > 0 && "At least one buffer is required");
       // It's a span of buffers, so we need to check each buffer
       for (size_t i = 0; i < buffer_own_.size(); ++i) {
-        UNIFEX_ASSERT(buffer_own_[i].data != nullptr &&
-                      buffer_own_[i].size != 0 &&
+        UNIFEX_ASSERT((buffer_own_[i].size == 0 ||
+                       buffer_own_[i].data != nullptr) &&
                       "The passed-in buffer must be allocated "
                       "when receiving IO vector data");
       }

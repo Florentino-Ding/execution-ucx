@@ -20,6 +20,7 @@ limitations under the License.
 #include <sys/socket.h>
 #include <ucs/sys/sock.h>
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstdint>
@@ -28,6 +29,7 @@ limitations under the License.
 #include <functional>
 #include <memory>
 #include <new>
+#include <span>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -327,6 +329,28 @@ bool UcxConnection::disconnect_progress(std::unique_ptr<UcxCallback> callback) {
 }
 
 namespace {
+// UCX detects a device IOV's memory type from its first address and can
+// check every subsequent address. Empty tensor entries may be null.
+template <typename Iov>
+bool prepare_iov(
+  std::span<Iov>& iov, ucs_memory_type_t memory_type,
+  std::unique_ptr<ucp_dt_iov_t[]>& filtered_iov) {
+  auto nonempty = [](const ucp_dt_iov_t& entry) { return entry.length != 0; };
+  iov = {std::ranges::find_if(iov, nonempty), iov.end()};
+  if (memory_type == UCS_MEMORY_TYPE_HOST || iov.empty()) {
+    return true;
+  }
+
+  const size_t count = std::ranges::count_if(iov, nonempty);
+  filtered_iov.reset(new (std::nothrow) ucp_dt_iov_t[count]);
+  if (!filtered_iov) {
+    return false;
+  }
+  std::ranges::copy_if(iov, filtered_iov.get(), nonempty);
+  iov = {filtered_iov.get(), count};
+  return true;
+}
+
 static inline void init_am_send_params(
   ucp_request_param_t& param, ucs_memory_type_t memory_type, ucp_mem_h memh,
   ucp_send_nbx_callback_t cb) {
@@ -420,6 +444,20 @@ std::tuple<ucs_status_t, UcxRequest*> UcxConnection::send_am_iov_data(
     return std::make_tuple(UCS_ERR_CANCELED, nullptr);
   }
 
+  std::span iov(iov_base, iov_count);
+  std::unique_ptr<ucp_dt_iov_t[]> filtered_iov;
+  if (!prepare_iov(iov, memory_type, filtered_iov)) {
+    (*callback)(UCS_ERR_NO_MEMORY);
+    return {UCS_ERR_NO_MEMORY, nullptr};
+  }
+  // An empty tensor list and a list of zero-sized tensors both carry their
+  // metadata in the header. There is no payload for a rendezvous receive.
+  if (iov.empty()) {
+    return send_am_data(
+      header, header_length, nullptr, 0, nullptr, UCS_MEMORY_TYPE_HOST,
+      callback);
+  }
+
   ucp_request_param_t param;
   init_am_send_params(
     param, memory_type, memh, (ucp_send_nbx_callback_t)common_request_callback);
@@ -427,14 +465,12 @@ std::tuple<ucs_status_t, UcxRequest*> UcxConnection::send_am_iov_data(
   param.op_attr_mask |= UCP_OP_ATTR_FIELD_DATATYPE;
   param.datatype = ucp_dt_make_iov();
 
-  // For now, we only support RNDV protocol. Because we need to get each
-  // data length from the header buffer, and header is defined by user.
-  param.flags |= UCP_AM_SEND_FLAG_RNDV;
-
   ucs_status_ptr_t sptr = ucp_am_send_nbx(
-    ep_, IOVEC_AM_MSG_ID, header, header_length, iov_base, iov_count, &param);
+    ep_, IOVEC_AM_MSG_ID, header, header_length, iov.data(), iov.size(),
+    &param);
   return process_request(
-    "ucp_am_send_nbx_iov", sptr, callback, UcxRequestType::Send);
+    "ucp_am_send_nbx_iov", sptr, callback, UcxRequestType::Send,
+    std::move(filtered_iov));
 }
 
 std::tuple<ucs_status_t, UcxRequest*> UcxConnection::recv_am_iov_data(
@@ -456,10 +492,18 @@ std::tuple<ucs_status_t, UcxRequest*> UcxConnection::recv_am_iov_data(
   param.op_attr_mask |= UCP_OP_ATTR_FIELD_DATATYPE;
   param.datatype = ucp_dt_make_iov();
 
-  ucs_status_ptr_t sptr =
-    ucp_am_recv_data_nbx(worker_, data_desc.desc, iov_base, iov_count, &param);
+  std::span iov(iov_base, iov_count);
+  std::unique_ptr<ucp_dt_iov_t[]> filtered_iov;
+  if (!prepare_iov(iov, memory_type, filtered_iov)) {
+    ucp_am_data_release(worker_, data_desc.desc);
+    (*callback)(UCS_ERR_NO_MEMORY);
+    return {UCS_ERR_NO_MEMORY, nullptr};
+  }
+  ucs_status_ptr_t sptr = ucp_am_recv_data_nbx(
+    worker_, data_desc.desc, iov.data(), iov.size(), &param);
   return process_request(
-    "ucp_am_recv_data_nbx_iov", sptr, callback, UcxRequestType::Recv);
+    "ucp_am_recv_data_nbx_iov", sptr, callback, UcxRequestType::Recv,
+    std::move(filtered_iov));
 }
 
 void UcxConnection::cancel_request(UcxRequest* request) {
@@ -678,7 +722,7 @@ void UcxConnection::ep_close(enum ucp_ep_close_mode mode) {
 
 std::tuple<ucs_status_t, UcxRequest*> UcxConnection::process_request(
   std::string_view what, ucs_status_ptr_t ptr_status, UcxCallback* callback,
-  UcxRequestType type) {
+  UcxRequestType type, std::unique_ptr<ucp_dt_iov_t[]> filtered_iov) {
   ucs_status_t status = UCS_OK;
 
   if (ptr_status == nullptr) {
@@ -704,6 +748,7 @@ std::tuple<ucs_status_t, UcxRequest*> UcxConnection::process_request(
       r->conn = std::ref(*this);
       r->type = type;
       r->what = what;
+      r->filtered_iov = std::move(filtered_iov);
       request_started(r);
     }
     return std::make_tuple(status, r);
@@ -727,6 +772,7 @@ void UcxConnection::request_cleanup(void* request) {
 }
 
 void UcxConnection::request_reset(UcxRequest* r) {
+  r->filtered_iov.reset();
   r->callback = nullptr;
   r->conn = std::nullopt;
   r->status = UCS_INPROGRESS;

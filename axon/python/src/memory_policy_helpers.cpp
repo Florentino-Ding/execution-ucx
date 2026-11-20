@@ -111,7 +111,7 @@ axon::CustomMemoryPolicy<BufferType> create_custom_memory_policy(
       return buffer_vec;
     } else if constexpr (std::is_same_v<BufferType, rpc::PayloadVariant>) {
       auto mr = runtime.GetMemoryResourceManager();
-      if (meta.size() == 1) {
+      if (meta.size() == 1 && !nb::isinstance<nb::list>(py_result)) {
         auto buffer = DlpackToUcxBuffer(py_result, meta[0], mr.get());
         RegisterCustomBuffer(buffer.data(), py_result);
         return rpc::PayloadVariant(

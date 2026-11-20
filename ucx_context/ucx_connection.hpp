@@ -180,6 +180,7 @@ struct UcxRequest {
   UcxRequestType type = UcxRequestType::Unknown;
   ucs_list_link_t pos;
   std::string_view what;
+  std::unique_ptr<ucp_dt_iov_t[]> filtered_iov;
 };
 
 // Global connection ID generator
@@ -326,8 +327,7 @@ class UcxConnection : public std::enable_shared_from_this<UcxConnection> {
   /**
    * @brief Receives active message data using scatter-gather I/O
    *
-   * For now only support RNDV protocol. Because we need to get each data length
-   * from the header buffer, and header is defined by user.
+   * Fetches a rendezvous descriptor into caller-provided IOV segments.
    *
    * @param iov_base Base pointer to the scatter-gather I/O list
    * @param iov_count Number of elements in the scatter-gather I/O list
@@ -540,7 +540,8 @@ class UcxConnection : public std::enable_shared_from_this<UcxConnection> {
 
   std::tuple<ucs_status_t, UcxRequest*> process_request(
     std::string_view what, ucs_status_ptr_t ptr_status, UcxCallback* callback,
-    UcxRequestType type = UcxRequestType::Unknown);
+    UcxRequestType type = UcxRequestType::Unknown,
+    std::unique_ptr<ucp_dt_iov_t[]> filtered_iov = {});
 
   static void invoke_callback(
     std::unique_ptr<UcxCallback>& callback, ucs_status_t status);

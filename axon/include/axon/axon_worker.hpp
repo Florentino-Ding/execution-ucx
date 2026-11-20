@@ -143,6 +143,57 @@ struct is_high_level_api : std::true_type {};
 template <typename PayloadT>
 struct is_dynamic_api : std::true_type {};
 
+ucxx::UcxBufferVec PlaceEagerTensorList(
+  ucxx::UcxMemoryResourceManager& mr, ucxx::UcxBuffer payload,
+  utils::TensorMetaSpan metas, std::optional<ucxx::UcxBufferVec> destination);
+
+template <typename BufferT, typename MemPolicyT>
+BufferT DecodeEagerPayload(
+  ucxx::UcxMemoryResourceManager& mr, ucxx::UcxBuffer&& payload,
+  const data::vector<rpc::ParamMeta>& params, MemPolicyT& mem_policy) {
+  if constexpr (std::is_same_v<BufferT, ucxx::UcxBuffer>) {
+    return std::move(payload);
+  } else {
+    auto meta_vec = utils::ExtractTensorMetaVec(params);
+    if constexpr (std::is_same_v<BufferT, rpc::PayloadVariant>) {
+      if (!meta_vec) {
+        return std::move(payload);
+      }
+    }
+    auto metas = utils::GetTensorMetas(params);
+    rpc::TensorMeta raw_meta{};
+    if (!meta_vec && metas.empty()) {
+      // A raw IOV has no tensor boundaries on the wire.
+      raw_meta.device = {kDLCPU, 0};
+      raw_meta.ndim = 1;
+      raw_meta.dtype = {kDLUInt, 8, 1};
+      raw_meta.shape = {static_cast<int64_t>(payload.size())};
+      metas = {&raw_meta, 1};
+    }
+
+    std::optional<ucxx::UcxBufferVec> destination;
+    if constexpr (!std::is_same_v<MemPolicyT, AlwaysOnHostPolicy>) {
+      auto allocated = (*mem_policy)(metas);
+      if constexpr (std::is_same_v<BufferT, rpc::PayloadVariant>) {
+        if (auto* vec = std::get_if<ucxx::UcxBufferVec>(&allocated)) {
+          destination.emplace(std::move(*vec));
+        } else if (
+          metas.size() == 1
+          && std::holds_alternative<ucxx::UcxBuffer>(allocated)) {
+          destination.emplace(std::get<ucxx::UcxBuffer>(std::move(allocated)));
+        } else {
+          throw std::invalid_argument(
+            "Memory policy returned incompatible tensor-list buffers");
+        }
+      } else {
+        destination.emplace(std::move(allocated));
+      }
+    }
+    return PlaceEagerTensorList(
+      mr, std::move(payload), metas, std::move(destination));
+  }
+}
+
 }  // namespace detail
 
 // Forward declaration
@@ -1483,7 +1534,7 @@ struct AxonWorker::ServerRequestHandlerVisitor_ {
         .workflow_id = cista::to_idx(req_header_ptr->workflow_id),
       });
     } else if constexpr (std::is_same_v<ReceivedBufferT, rpc::PayloadVariant>) {
-      if (tensor_metas.size() == 1) {
+      if (!utils::ExtractTensorMetaVec(req_header_ptr->params)) {
         return run_pipeline.template operator()<ucxx::UcxBuffer>();
       } else {
         return run_pipeline.template operator()<ucxx::UcxBufferVec>();
@@ -1510,32 +1561,25 @@ struct AxonWorker::ServerRequestHandlerVisitor_ {
         .hlc = worker->hlc_,
         .workflow_id = cista::to_idx(req_header_ptr->workflow_id),
       });
-    } else if constexpr (std::is_same_v<ReceivedBufferT, ucxx::UcxBufferVec>) {
-      auto tensor_metas = utils::GetTensorMetas(req_header_ptr->params);
-      if (tensor_metas.empty()) {
-        // If tensor_metas is empty, create UcxBufferVec directly with single
-        // segment instead of using to_buffer_vec
-        auto ucx_buffer_vec =
-          std::move(payload).to_buffer_vec({payload.size()});
-        return worker
-          ->ServerDispatchAndManageLifecycle_<ReceivedBufferT, MsgLcPolicyT>(
-            conn_id, req_header_ptr, std::move(ucx_buffer_vec), lc_policy);
-      } else {
-        std::vector<size_t> sizes;
-        sizes.reserve(tensor_metas.size());
-        std::ranges::transform(
-          tensor_metas, std::back_inserter(sizes), [](const auto& meta) {
-            return rpc::utils::CalculateTensorSize(meta);
-          });
-        auto ucx_buffer = std::move(payload).to_buffer_vec(sizes);
-        return worker
-          ->ServerDispatchAndManageLifecycle_<ReceivedBufferT, MsgLcPolicyT>(
-            conn_id, req_header_ptr, std::move(ucx_buffer), lc_policy);
-      }
     } else {
-      return worker
-        ->ServerDispatchAndManageLifecycle_<ReceivedBufferT, MsgLcPolicyT>(
-          conn_id, req_header_ptr, std::move(payload), lc_policy);
+      try {
+        auto decoded = detail::DecodeEagerPayload<ReceivedBufferT>(
+          worker->mr_, std::move(payload), req_header_ptr->params, mem_policy);
+        return worker
+          ->ServerDispatchAndManageLifecycle_<ReceivedBufferT, MsgLcPolicyT>(
+            conn_id, req_header_ptr, std::move(decoded), lc_policy);
+      } catch (const std::exception& error) {
+        return unifex::just_error(errors::AxonErrorContext{
+          .conn_id = conn_id,
+          .session_id = cista::to_idx(req_header_ptr->session_id),
+          .request_id = cista::to_idx(req_header_ptr->request_id),
+          .function_id = cista::to_idx(req_header_ptr->function_id),
+          .status = rpc::RpcStatus(rpc::RpcErrc::INVALID_ARGUMENT),
+          .what = error.what(),
+          .hlc = worker->hlc_,
+          .workflow_id = cista::to_idx(req_header_ptr->workflow_id),
+        });
+      }
     }
   }
 };
@@ -1723,7 +1767,7 @@ struct AxonWorker::ClientResponseHandlerVisitor_ {
     } else if constexpr (std::is_same_v<RespBufferT, rpc::PayloadVariant>) {
       using RndvReturnT =
         ResponseHandlerRndvProcessReturnType<RespBufferT, MemPolicyT>;
-      if (tensor_metas.size() == 1) {
+      if (!utils::ExtractTensorMetaVec(resp_header_ptr->results)) {
         return RndvReturnT(
           run_pipeline.template operator()<ucxx::UcxBuffer>()
           | unifex::then(RndvPayloadVariantConverter<ucxx::UcxBuffer>{}));
@@ -1739,39 +1783,14 @@ struct AxonWorker::ClientResponseHandlerVisitor_ {
 
   auto operator()(ucxx::UcxBuffer&& payload)
     -> ResponseHandlerReturnType<RespBufferT, MemPolicyT> {
-    // Eager Path
-    if constexpr (std::is_same_v<RespBufferT, ucxx::UcxBufferVec>) {
-      auto tensor_metas = utils::GetTensorMetas(resp_header_ptr->results);
-      if (tensor_metas.empty()) {
-        // If tensor_metas is empty, create UcxBufferVec directly with single
-        // segment instead of using to_buffer_vec
-        auto ucx_buffer_vec =
-          std::move(payload).to_buffer_vec({payload.size()});
-        return unifex::just(std::make_pair(
-          std::move(resp_header_ptr), std::move(ucx_buffer_vec)));
-      } else {
-        std::vector<size_t> sizes;
-        sizes.reserve(tensor_metas.size());
-        std::ranges::transform(
-          tensor_metas, std::back_inserter(sizes), [](const auto& meta) {
-            return rpc::utils::CalculateTensorSize(meta);
-          });
-        auto ucx_buffer = std::move(payload).to_buffer_vec(sizes);
-        return unifex::just(
-          std::make_pair(std::move(resp_header_ptr), std::move(ucx_buffer)));
-      }
-    } else if constexpr (std::is_same_v<RespBufferT, std::monostate>) {
-      // Return monostate as expected, ignoring the payload
+    if constexpr (std::is_same_v<RespBufferT, std::monostate>) {
       return unifex::just(
         std::make_pair(std::move(resp_header_ptr), std::monostate{}));
-    } else if constexpr (std::is_same_v<RespBufferT, rpc::PayloadVariant>) {
-      // UcxBuffer -> PayloadVariant
-      return unifex::just(std::make_pair(
-        std::move(resp_header_ptr), rpc::PayloadVariant(std::move(payload))));
     } else {
-      // UcxBuffer -> UcxBuffer (or compatible)
+      auto decoded = detail::DecodeEagerPayload<RespBufferT>(
+        worker->mr_, std::move(payload), resp_header_ptr->results, mem_policy);
       return unifex::just(
-        std::make_pair(std::move(resp_header_ptr), std::move(payload)));
+        std::make_pair(std::move(resp_header_ptr), std::move(decoded)));
     }
   }
 };

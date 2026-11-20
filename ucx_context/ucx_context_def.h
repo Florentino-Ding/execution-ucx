@@ -116,8 +116,9 @@ typedef struct ucx_am_data {
  *
  * @note The @a buffer_vec array and all referenced buffers must remain valid
  *       until the data transfer operation is complete.
- * @note Currently, only the RNDV protocol is supported, as the data length for
- *       each segment is determined from the user-defined header.
+ * @note UCX selects eager or rendezvous for nonempty payloads. An eager
+ *       receiver gets a contiguous payload; segment lengths is known to
+ *       the receiver from its header.
  */
 typedef struct ucx_am_iovec {
   ucx_buffer_t header;            ///< Header buffer payload.

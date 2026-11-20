@@ -15,6 +15,10 @@ limitations under the License.
 
 #include "ucx_context/ucx_memory_resource.hpp"
 
+#if CUDA_ENABLED
+#include <cuda_runtime_api.h>
+#endif
+
 #include <cstdint>
 #include <cstring>
 #if defined(__linux__)
@@ -28,22 +32,32 @@ limitations under the License.
 namespace eux {
 namespace ucxx {
 
-// Default constructor initializes all memory resources to default resource
-// and memcpy functions to std::memcpy
 DefaultUcxMemoryResourceManager::DefaultUcxMemoryResourceManager() {
   // Initialize all memory resources to the default resource
   for (size_t i = 0; i < UCX_MEMORY_TYPE_COUNT; ++i) {
     memory_resources_[i] = std::ref(*std::pmr::get_default_resource());
   }
-  // Initialize all memcpy functions to std::memcpy
-  for (size_t i = 0; i < UCX_MEMORY_TYPE_COUNT; ++i) {
-    for (size_t j = 0; j < UCX_MEMORY_TYPE_COUNT; ++j) {
-      memcpy_fns_[i][j] =
-        [](void* dest, const void* src, size_t count) -> void* {
-        return std::memcpy(dest, src, count);
-      };
+  register_memcpy_fn(ucx_memory_type::HOST, ucx_memory_type::HOST, std::memcpy);
+#if CUDA_ENABLED
+  auto copy_to_cuda = [](void* dest, const void* src, size_t count) {
+    auto status = cudaMemcpy(dest, src, count, cudaMemcpyHostToDevice);
+    if (status == cudaSuccess) {
+      // Pageable host copies can return after staging. Complete the transfer
+      // before publishing the destination to a consumer on another stream.
+      status = cudaStreamSynchronize(nullptr);
     }
-  }
+    if (status != cudaSuccess) {
+      throw std::runtime_error(
+        std::string("CUDA host-to-device copy failed: ")
+        + cudaGetErrorString(status));
+    }
+    return dest;
+  };
+  register_memcpy_fn(
+    ucx_memory_type::CUDA, ucx_memory_type::HOST, copy_to_cuda);
+  register_memcpy_fn(
+    ucx_memory_type::CUDA_MANAGED, ucx_memory_type::HOST, copy_to_cuda);
+#endif
 }
 
 // Register memory resource by reference (more efficient)

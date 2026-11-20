@@ -87,19 +87,24 @@ using TensorMetaRefVec = std::vector<TensorMetaRef>;
 /// @brief Span alias for zero-copy view over tensor metas.
 using TensorMetaSpan = std::span<const TensorMeta>;
 
-// Helper function to calculate tensor size in bytes
-inline size_t CalculateTensorSize(const TensorMeta& meta) {
-  // An empty shape denotes a scalar (one element). A zero extent in a
-  // non-scalar shape still produces an empty tensor.
-  // Calculate total number of elements
-  int64_t total_elements = 1;
-  for (int32_t i = 0; i < meta.ndim; ++i) {
-    total_elements *= meta.shape[i];
+inline size_t CalculateTensorSize(
+  DLDataType dtype, std::span<const int64_t> shape) {
+  // A scalar has one element, and every lane belongs to that element.
+  size_t bytes = (dtype.bits * dtype.lanes + 7) / 8;
+  for (const auto extent : shape) {
+    bytes *= extent;
   }
-  // Calculate bytes per element: dtype.bits / 8
-  size_t bytes_per_element = (meta.dtype.bits + 7) / 8;  // Round up division
+  return bytes;
+}
 
-  return static_cast<size_t>(total_elements) * bytes_per_element;
+inline size_t CalculateTensorSize(const TensorMeta& meta) {
+  return CalculateTensorSize(
+    meta.dtype, {meta.shape.data(), static_cast<size_t>(meta.ndim)});
+}
+
+inline size_t CalculateTensorSize(const DLTensor& tensor) {
+  return CalculateTensorSize(
+    tensor.dtype, {tensor.shape, static_cast<size_t>(tensor.ndim)});
 }
 
 }  // namespace utils
